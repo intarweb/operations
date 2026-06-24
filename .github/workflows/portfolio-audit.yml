@@ -1,0 +1,263 @@
+name: 🔍 intarweb portfolio audit
+
+# Daily snapshot + diff of the intarweb fork portfolio. Surfaces drift before
+# it cascades into email storms (template drift, missing workflows, stale builds,
+# broken sync). Writes a markdown digest to validation-queue/portfolio-drift-<date>.md
+# only if drift is detected — silence = nothing changed.
+#
+# Codified in oss-contributing:intarweb-portfolio-audit skill (Tier 1 automation).
+
+on:
+  schedule:
+    - cron: '0 14 * * *'    # daily 14:00 UTC (reverted from hourly 2026-06-23 — Actions minutes burn)
+  workflow_dispatch:
+
+permissions:
+  contents: write    # for committing snapshot + digest
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔧 Setup gh + jq
+        run: |
+          # gh CLI is preinstalled on ubuntu-latest runners
+          gh --version
+          jq --version
+
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+
+      - name: 🔐 Credential health-check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Sanity-check: can we actually use this token?
+          # If fails (key revoked, App uninstalled, perms changed), surface in digest.
+          set -euo pipefail
+          ME=$(gh api /installation/repositories --jq '.total_count' 2>&1 || echo "ERROR")
+          if [ "$ME" = "ERROR" ] || [ -z "$ME" ]; then
+            echo "::error::App credentials FAILED — token mint succeeded but API call failed. Inspect intarweb-sync-bot at https://github.com/organizations/intarweb/settings/installations"
+            exit 1
+          fi
+          echo "  ✓ App auth healthy — has access to $ME repos"
+
+      - name: 📊 Run portfolio status (JSON output)
+        id: scan
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p validation-queue/portfolio-snapshots
+
+          # Inline portfolio scan (matches scripts/intarweb-portfolio-status.sh --json)
+          OUT=validation-queue/portfolio-snapshots/$(date -u +%Y-%m-%d).json
+          : > "$OUT"
+          for F in $(gh api 'orgs/intarweb/repos?per_page=100' --jq '.[].name' | sort); do
+            WFS=$(gh api "repos/intarweb/${F}/contents/.github/workflows" --jq '[.[].name] | join(",")' 2>/dev/null || echo "")
+            HAS_SYNC=$(echo "$WFS" | grep -q sync-upstream && echo true || echo false)
+            HAS_PUB=$(echo "$WFS" | grep -q fork-publish && echo true || echo false)
+            HAS_FI=$(echo "$WFS" | grep -q update-fork-info && echo true || echo false)
+            HAS_BFS=$(echo "$WFS" | grep -q build-from-source && echo true || echo false)
+            DEV=$(gh api "repos/intarweb/${F}/branches/intarweb-dev" >/dev/null 2>&1 && echo true || echo false)
+            PUSHED=$(gh api "repos/intarweb/${F}" --jq '.pushed_at' 2>/dev/null || echo "")
+            UPSTREAM=$(gh api "repos/intarweb/${F}" --jq '.parent.full_name // .source.full_name // "unknown"' 2>/dev/null)
+
+            # Latest sync + build status. Filter by workflow STATE (active only) —
+            # `gh run list --workflow build-from-source.yml` returns the latest run
+            # even if the workflow file was later DELETED or DISABLED, so a stale
+            # failure from a now-removed workflow would alarm forever. Audit must
+            # only consider the result if the workflow is currently active.
+            SYNC_STATE=$(gh api "repos/intarweb/${F}/actions/workflows" \
+              --jq '.workflows[] | select(.path | endswith("sync-upstream.yml")) | .state' 2>/dev/null | head -1)
+            BUILD_STATE=$(gh api "repos/intarweb/${F}/actions/workflows" \
+              --jq '.workflows[] | select(.path | endswith("build-from-source.yml")) | .state' 2>/dev/null | head -1)
+            if [ "$SYNC_STATE" = "active" ]; then
+              SYNC_CONCL=$(gh run list --repo "intarweb/${F}" --workflow sync-upstream.yml --limit 1 --json conclusion --jq '.[0].conclusion // "none"' 2>/dev/null || echo none)
+            else
+              SYNC_CONCL="none"
+            fi
+            if [ "$BUILD_STATE" = "active" ]; then
+              BUILD_CONCL=$(gh run list --repo "intarweb/${F}" --workflow build-from-source.yml --limit 1 --json conclusion --jq '.[0].conclusion // "none"' 2>/dev/null || echo none)
+            else
+              BUILD_CONCL="none"
+            fi
+
+            # PR count
+            PR_COUNT=0
+            if [ "$UPSTREAM" != "unknown" ]; then
+              PR_COUNT=$(gh pr list --repo "$UPSTREAM" --state open --json number,headRepositoryOwner \
+                --jq "[.[] | select(.headRepositoryOwner.login == \"intarweb\")] | length" 2>/dev/null || echo 0)
+            fi
+
+            # Class
+            if [ "$HAS_SYNC" = true ] && [ "$DEV" = true ]; then
+              CLASS="model-b"
+              [ "$HAS_FI" = false ] && CLASS="model-b-DRIFT-no-fork-info"
+            elif [ "$HAS_PUB" = true ]; then
+              CLASS="plain-mirror"
+            else
+              CLASS="other"
+            fi
+
+            jq -nc \
+              --arg name "$F" --arg class "$CLASS" --arg pushed "$PUSHED" \
+              --arg upstream "$UPSTREAM" --arg sync "$SYNC_CONCL" --arg build "$BUILD_CONCL" \
+              --argjson prs "${PR_COUNT:-0}" \
+              --argjson has_sync $HAS_SYNC --argjson has_pub $HAS_PUB \
+              --argjson has_fi $HAS_FI --argjson has_bfs $HAS_BFS --argjson has_dev $DEV \
+              '{name:$name, class:$class, pushed:$pushed, upstream:$upstream,
+                sync_conclusion:$sync, build_conclusion:$build, open_intarweb_prs:$prs,
+                workflows: {sync_upstream:$has_sync, fork_publish:$has_pub,
+                            update_fork_info:$has_fi, build_from_source:$has_bfs},
+                intarweb_dev_present:$has_dev}' >> "$OUT"
+          done
+
+          # Aggregate to single JSON array — filter to only valid objects (defensive
+          # against any fork emitting a malformed line, e.g. on gh api transient errors).
+          jq -s '[.[] | select(type == "object")]' "$OUT" > "${OUT}.tmp" && mv "${OUT}.tmp" "$OUT"
+          echo "snapshot=$OUT" >> "$GITHUB_OUTPUT"
+          echo "  ✓ wrote snapshot: $OUT ($(wc -l <"$OUT") lines)"
+
+      - name: 🔬 Diff against last snapshot
+        id: diff
+        run: |
+          set -euo pipefail
+          CUR="${{ steps.scan.outputs.snapshot }}"
+          # Find prior snapshot (newest by name, excluding today's)
+          TODAY=$(basename "$CUR" .json)
+          PRIOR=$(ls -1 validation-queue/portfolio-snapshots/*.json 2>/dev/null \
+                    | grep -v "${TODAY}.json" | sort | tail -1 || true)
+
+          DIGEST="validation-queue/portfolio-drift-${TODAY}.md"
+          ANY_DRIFT=false
+          {
+            echo "# Portfolio drift — ${TODAY}"
+            echo ""
+            echo "Snapshot: \`${CUR}\`"
+            [ -n "$PRIOR" ] && echo "Prior:    \`${PRIOR}\`" || echo "Prior:    (none — first run)"
+            echo ""
+          } > "$DIGEST"
+
+          # 1. Always-flag conditions (regardless of prior)
+          DRIFT_FORKS=$(jq -r '.[] | select(.class == "model-b-DRIFT-no-fork-info") | .name' "$CUR")
+          if [ -n "$DRIFT_FORKS" ]; then
+            ANY_DRIFT=true
+            echo "## ⚠️ Model B forks missing update-fork-info.yml" >> "$DIGEST"
+            echo "" >> "$DIGEST"
+            echo "$DRIFT_FORKS" | sed 's/^/  - /' >> "$DIGEST"
+            echo "" >> "$DIGEST"
+          fi
+
+          FAILED_SYNC=$(jq -r '.[] | select(.sync_conclusion == "failure") | .name' "$CUR")
+          if [ -n "$FAILED_SYNC" ]; then
+            ANY_DRIFT=true
+            echo "## ❌ Forks with FAILED sync-upstream (latest run)" >> "$DIGEST"
+            echo "" >> "$DIGEST"
+            echo "$FAILED_SYNC" | sed 's/^/  - /' >> "$DIGEST"
+            echo "" >> "$DIGEST"
+          fi
+
+          FAILED_BUILD=$(jq -r '.[] | select(.build_conclusion == "failure" and .workflows.build_from_source == true) | .name' "$CUR")
+          if [ -n "$FAILED_BUILD" ]; then
+            ANY_DRIFT=true
+            echo "## ❌ Forks with FAILED build-from-source (workflow present)" >> "$DIGEST"
+            echo "" >> "$DIGEST"
+            echo "$FAILED_BUILD" | sed 's/^/  - /' >> "$DIGEST"
+            echo "" >> "$DIGEST"
+          fi
+
+          # 2. Diff-against-prior conditions
+          if [ -n "$PRIOR" ]; then
+            NEW_FORKS=$(jq -r --slurpfile p "$PRIOR" '
+              [.[] | .name] as $cur |
+              [$p[0][] | .name] as $old |
+              ($cur - $old) | .[]
+            ' "$CUR")
+            if [ -n "$NEW_FORKS" ]; then
+              ANY_DRIFT=true
+              echo "## 🆕 New forks since last snapshot" >> "$DIGEST"
+              echo "" >> "$DIGEST"
+              echo "$NEW_FORKS" | sed 's/^/  - /' >> "$DIGEST"
+              echo "" >> "$DIGEST"
+              echo "  → Run \`scripts/bootstrap-fork.sh <upstream-owner/repo>\` if these need Model B treatment." >> "$DIGEST"
+              echo "" >> "$DIGEST"
+            fi
+
+            REMOVED_FORKS=$(jq -r --slurpfile p "$PRIOR" '
+              [.[] | .name] as $cur |
+              [$p[0][] | .name] as $old |
+              ($old - $cur) | .[]
+            ' "$CUR")
+            if [ -n "$REMOVED_FORKS" ]; then
+              ANY_DRIFT=true
+              echo "## ➖ Forks removed since last snapshot" >> "$DIGEST"
+              echo "" >> "$DIGEST"
+              echo "$REMOVED_FORKS" | sed 's/^/  - /' >> "$DIGEST"
+              echo "" >> "$DIGEST"
+            fi
+          fi
+
+          # 3. Summary table (always include)
+          {
+            echo "## Inventory ($(jq 'length' "$CUR") forks)"
+            echo ""
+            echo "| Fork | Class | sync | build | open PRs |"
+            echo "|---|---|---|---|---|"
+            jq -r '.[] | "| \(.name) | \(.class) | \(.sync_conclusion) | \(.build_conclusion) | \(.open_intarweb_prs) |"' "$CUR"
+          } >> "$DIGEST"
+
+          if $ANY_DRIFT; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+            echo "  ⚠ DRIFT detected — digest written"
+          else
+            echo "drift=false" >> "$GITHUB_OUTPUT"
+            echo "  ✓ no drift — deleting digest"
+            rm -f "$DIGEST"
+          fi
+
+      - name: 💾 Commit + push (SSH-signed)
+        run: |
+          set -euo pipefail
+
+          # Commits made by the workflow are UNSIGNED — this is a public ops repo
+          # (relocated from private terafin/claude 2026-06-24); BOT_SIGNING_KEY was
+          # terafin/claude-local and not worth copying for an internal drift report.
+          git config user.email "actions@github.com"
+          git config user.name "intarweb portfolio-audit bot"
+
+          echo "  pre-stage status:"
+          git status --short validation-queue/ | sed 's/^/    /'
+
+          # Stage in two calls — globs that match nothing make `git add` fail loudly
+          # without -e/|| true protection, and atomic-add semantics may skip earlier
+          # args. Split for clarity.
+          git add -A validation-queue/portfolio-snapshots/
+          for f in validation-queue/portfolio-drift-*.md; do
+            [ -f "$f" ] && git add "$f"
+          done
+
+          echo "  post-stage status:"
+          git status --short validation-queue/ | sed 's/^/    /'
+
+          if git diff --cached --quiet; then
+            echo "  ✓ no changes to commit"
+            exit 0
+          fi
+          if [ "${{ steps.diff.outputs.drift }}" = "true" ]; then
+            git commit -m "portfolio-audit: drift detected on $(date -u +%Y-%m-%d)"
+          else
+            git commit -m "portfolio-audit: snapshot $(date -u +%Y-%m-%d) (no drift)"
+          fi
+          git push

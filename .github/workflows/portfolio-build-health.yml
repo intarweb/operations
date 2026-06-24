@@ -1,0 +1,253 @@
+name: 🚦 intarweb portfolio build health
+
+# Daily build-pipeline health monitor for the intarweb fork portfolio. For every
+# fork whose build-from-source.yml is currently `active` (skipping plain-mirrors
+# and any fork where the workflow has been disabled or removed), classify the
+# pipeline as RED or GREEN and reflect that as a tracking issue on the affected
+# fork itself. RED = latest build either failed OR is a stale-success older than
+# 7 days; GREEN = clean success within 7 days. The workflow opens / refreshes /
+# closes a single tracking issue per fork (title prefix '🔴 Build pipeline stale:')
+# so the inbox doesn't drown in re-comments — body is patched on every run, and
+# only one comment is left at recovery before close.
+#
+# Companion to portfolio-audit.yml + portfolio-auto-heal.yml. Distinct workflow,
+# not folded into auto-heal: the surface is "communicate state to the fork
+# owner", not "apply a fix" — those two concerns deserve separate logs.
+#
+# IMPORTANT — App permissions: cross-org issue creation requires the
+# intarweb-sync-bot GitHub App to have `issues: write` on intarweb repos.
+# Verify at https://github.com/organizations/intarweb/settings/installations
+# before depending on this workflow. If the App lacks `issues: write`, the
+# `gh api -X POST .../issues` calls will return 403 — visible as `errors` in
+# the run summary table.
+
+on:
+  schedule:
+    - cron: '0 9 * * *'    # daily 09:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read    # mutations on intarweb repos go via App token, not GITHUB_TOKEN
+
+jobs:
+  build-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+
+      - name: 🔐 Credential health-check
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Sanity-check: token mint succeeded — but does the API agree?
+          set -euo pipefail
+          ME=$(gh api /installation/repositories --jq '.total_count' 2>&1 || echo "ERROR")
+          if [ "$ME" = "ERROR" ] || [ -z "$ME" ]; then
+            echo "::error::App credentials FAILED — token mint succeeded but API call failed"
+            exit 1
+          fi
+          echo "  ✓ App auth healthy — has access to $ME repos"
+
+      - name: 🚦 Scan + reconcile build health
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          NOW=$(date -u +%s)
+          TODAY=$(date -u +%Y-%m-%d)
+
+          # Tally counters for the summary table
+          SCANNED=0
+          ACTIVE=0
+          RED=0
+          GREEN=0
+          OPENED=0
+          UPDATED=0
+          CLOSED=0
+          ERRORS=0
+
+          ISSUE_TITLE_PREFIX="🔴 Build pipeline stale:"
+
+          for FORK in $(gh api 'orgs/intarweb/repos?per_page=100' --jq '.[].name' | sort); do
+            SCANNED=$((SCANNED + 1))
+
+            # Skip plain-mirrors and any fork where build-from-source.yml is
+            # disabled / deleted / never installed. Mirrors plain-mirror semantics
+            # from portfolio-audit (state != active → don't alarm).
+            BUILD_STATE=$(gh api "repos/intarweb/${FORK}/actions/workflows" \
+              --jq '.workflows[] | select(.path | endswith("build-from-source.yml")) | .state' 2>/dev/null | head -1)
+            if [ "$BUILD_STATE" != "active" ]; then
+              continue
+            fi
+            ACTIVE=$((ACTIVE + 1))
+
+            # Latest run — single object so we can pull every field we need at once.
+            LATEST=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml \
+              --limit 1 --json conclusion,createdAt,databaseId,url,headSha 2>/dev/null \
+              | jq -c '.[0] // empty')
+            if [ -z "$LATEST" ]; then
+              echo "  ${FORK}: workflow active but 0 runs ever — skipping (Heal H will dispatch)"
+              continue
+            fi
+
+            CONCL=$(echo "$LATEST" | jq -r '.conclusion // "none"')
+            CREATED=$(echo "$LATEST" | jq -r '.createdAt')
+            RUN_ID=$(echo "$LATEST" | jq -r '.databaseId')
+            RUN_URL=$(echo "$LATEST" | jq -r '.url')
+            HEAD_SHA=$(echo "$LATEST" | jq -r '.headSha')
+            SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-7)
+
+            # Age in hours via GNU date (-d). Ubuntu runner only — would fail on
+            # BSD date (macOS), which is why this can't be dry-run-tested locally
+            # on a Mac without the -j -f workaround.
+            AGE_S=$(( NOW - $(date -d "$CREATED" +%s) ))
+            AGE_H=$(( AGE_S / 3600 ))
+
+            # State classification — order matters: explicit failure > stale success.
+            STATE="GREEN"
+            if [ "$CONCL" = "failure" ]; then
+              STATE="RED"
+            elif [ "$CONCL" = "success" ] && [ "$AGE_H" -gt 168 ]; then
+              STATE="RED"   # stale success: workflow active, no new runs in 7d
+            elif [ "$CONCL" != "success" ]; then
+              # cancelled/timed_out/action_required/etc — treat as RED.
+              # `none` (in-progress) is rare on a daily cadence but also non-green.
+              STATE="RED"
+            fi
+
+            if [ "$STATE" = "RED" ]; then
+              RED=$((RED + 1))
+            else
+              GREEN=$((GREEN + 1))
+            fi
+
+            # Look for an existing OPEN tracking issue. Title-prefix match via the
+            # search API — `in:title "<prefix>"` keeps it tight (not body / comments).
+            EXISTING=$(gh api "search/issues?q=repo:intarweb/${FORK}+is:issue+is:open+in:title+%22${ISSUE_TITLE_PREFIX// /+}%22" \
+              --jq '.items[0] // empty' 2>/dev/null || echo "")
+            EXISTING_NUM=$(echo "$EXISTING" | jq -r '.number // empty' 2>/dev/null || echo "")
+
+            case "$STATE" in
+              RED)
+                # Find last successful run for the body (look back 50 — enough to be
+                # useful, bounded so we don't paginate forever on a long-broken fork).
+                GOOD=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml \
+                  --limit 50 --json conclusion,createdAt,databaseId,url,headSha \
+                  --jq '[.[] | select(.conclusion == "success")] | .[0] // empty' 2>/dev/null || echo "")
+                if [ -n "$GOOD" ]; then
+                  GOOD_ID=$(echo "$GOOD" | jq -r '.databaseId')
+                  GOOD_URL=$(echo "$GOOD" | jq -r '.url')
+                  GOOD_SHA=$(echo "$GOOD" | jq -r '.headSha' | cut -c1-7)
+                  GOOD_CREATED=$(echo "$GOOD" | jq -r '.createdAt')
+                  GOOD_AGE_H=$(( ( NOW - $(date -d "$GOOD_CREATED" +%s) ) / 3600 ))
+                  GOOD_LINE="| Last successful run | [${GOOD_ID}](${GOOD_URL}) at ${GOOD_AGE_H}h ago |"
+                  GOOD_SHA_LINE="| Last successful SHA | ${GOOD_SHA} |"
+                else
+                  GOOD_LINE="| Last successful run | (none in last 50 runs) |"
+                  GOOD_SHA_LINE="| Last successful SHA | (none in last 50 runs) |"
+                fi
+
+                # Build the body once — same template for create + update so the
+                # PATCH path doesn't drift from the POST path. Use printf with
+                # explicit \n so the entire script stays inside the YAML run: |
+                # block (a heredoc with column-0 content terminates the block
+                # scalar early — burned 2026-06-09 first deploy).
+                BODY=$(printf '%s\n' \
+                  "The build-from-source workflow on this fork is in a degraded state." \
+                  "" \
+                  "| Field | Value |" \
+                  "|---|---|" \
+                  "| Latest run | [${RUN_ID}](${RUN_URL}) |" \
+                  "| Conclusion | ${CONCL} |" \
+                  "| Age | ${AGE_H}h ago |" \
+                  "| Head SHA | ${SHORT_SHA} |" \
+                  "${GOOD_LINE}" \
+                  "${GOOD_SHA_LINE}" \
+                  "" \
+                  "This issue will auto-close when the next build succeeds. Detected by [portfolio-build-health](https://github.com/terafin/claude/actions/workflows/portfolio-build-health.yml) on ${TODAY}.")
+
+                if [ -z "$EXISTING_NUM" ]; then
+                  # CREATE — no existing open tracker
+                  TITLE="${ISSUE_TITLE_PREFIX} ${FORK}"
+                  ERR=$(jq -nc --arg title "$TITLE" --arg body "$BODY" \
+                          '{title:$title, body:$body}' \
+                        | gh api --method POST "repos/intarweb/${FORK}/issues" --input - 2>&1 >/dev/null)
+                  if [ -z "$ERR" ]; then
+                    echo "  ${FORK}: RED — opened tracking issue"
+                    OPENED=$((OPENED + 1))
+                  else
+                    # Verbatim error from API — was previously hardcoded as "App needs
+                    # issues:write?" which misled diagnosis on 2026-06-09 when the real
+                    # cause was Issues disabled on the fork (inherited from upstream).
+                    echo "  ${FORK}: RED — FAILED to open issue: ${ERR}"
+                    ERRORS=$((ERRORS + 1))
+                  fi
+                else
+                  # UPDATE — refresh body only, no new comment (avoids spam on every cron)
+                  ERR=$(jq -nc --arg body "$BODY" '{body:$body}' \
+                        | gh api --method PATCH "repos/intarweb/${FORK}/issues/${EXISTING_NUM}" --input - 2>&1 >/dev/null)
+                  if [ -z "$ERR" ]; then
+                    echo "  ${FORK}: RED — refreshed body on issue #${EXISTING_NUM}"
+                    UPDATED=$((UPDATED + 1))
+                  else
+                    echo "  ${FORK}: RED — FAILED to PATCH issue #${EXISTING_NUM}: ${ERR}"
+                    ERRORS=$((ERRORS + 1))
+                  fi
+                fi
+                ;;
+              GREEN)
+                if [ -n "$EXISTING_NUM" ]; then
+                  # CLOSE — leave one recovery comment, then close. Two-step API
+                  # because POST issues/N/comments + PATCH issues/N are separate
+                  # endpoints (no atomic close-with-comment in REST v3).
+                  COMMENT_BODY="Build recovered at ${RUN_URL}"
+                  COMMENT_OK=true
+                  if ! jq -nc --arg body "$COMMENT_BODY" '{body:$body}' \
+                       | gh api --method POST "repos/intarweb/${FORK}/issues/${EXISTING_NUM}/comments" --input - >/dev/null 2>&1; then
+                    COMMENT_OK=false
+                  fi
+                  CLOSE_ERR=$(jq -nc '{state:"closed"}' \
+                              | gh api --method PATCH "repos/intarweb/${FORK}/issues/${EXISTING_NUM}" --input - 2>&1 >/dev/null)
+                  if [ -z "$CLOSE_ERR" ]; then
+                    if $COMMENT_OK; then
+                      echo "  ${FORK}: GREEN — closed issue #${EXISTING_NUM} with recovery comment"
+                    else
+                      echo "  ${FORK}: GREEN — closed issue #${EXISTING_NUM} (comment failed)"
+                    fi
+                    CLOSED=$((CLOSED + 1))
+                  else
+                    echo "  ${FORK}: GREEN — FAILED to close issue #${EXISTING_NUM}: ${CLOSE_ERR}"
+                    ERRORS=$((ERRORS + 1))
+                  fi
+                fi
+                # GREEN + no open issue → no-op (the steady state, silent)
+                ;;
+            esac
+          done
+
+          # Markdown summary table for the run-summary page
+          {
+            echo "## Build health reconcile — ${TODAY}"
+            echo ""
+            echo "| Metric | Count |"
+            echo "|---|---|"
+            echo "| Forks scanned | ${SCANNED} |"
+            echo "| With active build-from-source | ${ACTIVE} |"
+            echo "| RED | ${RED} |"
+            echo "| GREEN | ${GREEN} |"
+            echo "| Issues opened | ${OPENED} |"
+            echo "| Issues updated | ${UPDATED} |"
+            echo "| Issues closed | ${CLOSED} |"
+            echo "| Errors | ${ERRORS} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo ""
+          echo "  scanned=${SCANNED} active=${ACTIVE} red=${RED} green=${GREEN}"
+          echo "  opened=${OPENED} updated=${UPDATED} closed=${CLOSED} errors=${ERRORS}"

@@ -1,0 +1,1015 @@
+name: 🔧 intarweb portfolio auto-heal
+
+# Self-healing layer for the intarweb fork portfolio. Reads the latest snapshot
+# from validation-queue/portfolio-snapshots/, identifies fixable conditions,
+# and applies the fix using the org GitHub App.
+#
+# Heals (safe, idempotent):
+#   A. Template drift — push canonical workflow file when fork's content differs.
+#      Also re-enables workflows in state==disabled_manually (2026-06-10, vllm).
+#   B. Transient failure retry — dispatch sync/build for failures older than 1h.
+#   C. Cherry-pick conflict skip — handled in sync-upstream.yml itself (continue
+#      with remaining PRs instead of aborting). No separate heal needed here.
+#   D. Auto-bootstrap new forks — if a new repo appears in intarweb org and has
+#      the topic 'auto-bootstrap', run the full bootstrap dance (Model B install).
+#      OPT-IN via topic to avoid auto-Model-B-ifying experimental forks.
+#   E. Pin :latest to last-good — if build-from-source has failed N consecutive
+#      runs, pin :latest to the most recent successful sha-XXXXXXX so consumers
+#      don't regress while the bug is being investigated.
+#   F. Disable upstream-native publish workflows that compete with our 4.
+#   G. Prune untagged GHCR orphan versions older than 14 days.
+#   H. Kick scheduled-but-never-ran sync-upstream — GitHub disables `schedule:`
+#      on forks until the workflow is dispatched manually at least once. Any
+#      fork where sync-upstream total_count == 0 gets a single workflow_dispatch
+#      to register the schedule. One-shot per fork (idempotent: post-dispatch
+#      total_count > 0, so it's no longer eligible). Honest-fact #62.
+#   K. Kick stale :latest — if intarweb-dev's tip commit timestamp > :latest
+#      digest's created_at, dispatch build-from-source.yml. Sleeps 30s at start
+#      to let Heal A's workflow-enable propagate. Dedups against in-progress +
+#      queued runs. Honest-fact #74-75.
+#   M. IS_SOURCE_BUILT bootstrap — auto-set the repo Variable that gates
+#      fork-publish.yml's :latest block. Source-built forks get true; plain-mirror
+#      forks get the variable unset. Idempotent: re-runnable every sweep.
+#      Honest-fact #72.
+#
+# Does NOT heal (real human-judgment cases):
+#   - Per-fork repo Variables (DOCKERFILE/PLATFORMS overrides)
+#   - Removed forks (cleanup is a judgment call)
+#   - Stale PR closing (judgment call)
+#
+# Codified in oss-contributing:intarweb-portfolio-audit skill.
+
+on:
+  schedule:
+    - cron: '15 14 * * *'    # daily 14:15 UTC (reverted from hourly 2026-06-23 — Actions minutes burn)
+  workflow_run:
+    workflows: ["🔍 intarweb portfolio audit"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'If true, all heals log what they WOULD do but make no mutations. GETs still run.'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: read    # for reading snapshots; mutations go via App token
+  packages: write   # Heal E needs this to repoint :latest tag
+
+jobs:
+  heal:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name != 'workflow_run' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+
+      - name: 📊 Load latest snapshot
+        id: snap
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          SNAP=$(ls -1 validation-queue/portfolio-snapshots/*.json 2>/dev/null | sort | tail -1)
+          if [ -z "$SNAP" ]; then
+            echo "  ✗ no snapshot found — audit must run first"
+            exit 0
+          fi
+          # Validate snapshot JSON before any heal reads it. Without this, malformed
+          # JSON causes `jq -c '.[]' "$SNAP"` inside heal process-substitutions to
+          # exit silently — the while loops read zero records, all counters stay 0,
+          # heal step shows green but did nothing. Better to fail loud here than
+          # silent-pass downstream. Honest-fact #82.
+          # Empty array `[]` is a LEGITIMATE state (fleet just bootstrapped, zero
+          # forks yet) — only fail loud on actually-malformed JSON.
+          if ! jq -e 'type == "array"' "$SNAP" >/dev/null; then
+            echo "  ✗ snapshot $SNAP is malformed (not a JSON array) — failing loud"
+            exit 1
+          fi
+          echo "  ✓ snapshot on disk: $SNAP ($(jq 'length' "$SNAP") forks)"
+
+          # Live-augment: snapshots are generated nightly. A fork bootstrapped
+          # MID-DAY (intarweb-dev branch + canonical workflows installed via
+          # the bootstrap path) won't appear in today's snapshot until tomorrow's
+          # regen. Heal A's iteration filter (`select(.workflows.sync_upstream
+          # == true and .intarweb_dev_present == true)`) silently skips such
+          # forks — observed 2026-06-11 on `connect` and `SGM-Helper` after
+          # mid-day bootstrap; heal-A reported "actions: 0" despite real drift.
+          # Burned through three heal sweeps before noticed. Honest-fact #93.
+          #
+          # Fix: enumerate all intarweb forks via the live API and merge any
+          # missing entries into the snapshot in-step. For each missing fork we
+          # compute the minimum schema needed by heal A/D/K/M (name, upstream,
+          # workflows.sync_upstream, intarweb_dev_present). Cost: ~3 API calls
+          # per missing fork; usually zero (snapshot already current). Other
+          # fields (sync_conclusion, build_conclusion, open_intarweb_prs, etc)
+          # are not heal-input — leave them undefined for augmented entries.
+          AUGMENTED=$(jq -c '.' "$SNAP")
+          SNAPSHOT_NAMES=$(jq -r '.[].name' "$SNAP" | sort -u)
+          ADDED=0
+          while read -r FORK; do
+            [ -z "$FORK" ] && continue
+            if ! grep -qFx "$FORK" <<< "$SNAPSHOT_NAMES"; then
+              # Live-fetch the minimum heal needs to iterate on this fork
+              UPSTREAM=$(gh api "repos/intarweb/${FORK}" --jq '.parent.full_name // ""' 2>/dev/null)
+              [ -z "$UPSTREAM" ] && continue   # not a real fork; skip (e.g. orphaned repo)
+
+              SYNC_WF=false
+              if gh api "repos/intarweb/${FORK}/contents/.github/workflows/sync-upstream.yml" >/dev/null 2>&1; then
+                SYNC_WF=true
+              fi
+
+              DEV_PRESENT=false
+              if gh api "repos/intarweb/${FORK}/branches/intarweb-dev" >/dev/null 2>&1; then
+                DEV_PRESENT=true
+              fi
+
+              ENTRY=$(jq -nc \
+                --arg name "$FORK" \
+                --arg upstream "$UPSTREAM" \
+                --argjson sync_wf "$SYNC_WF" \
+                --argjson dev_present "$DEV_PRESENT" \
+                '{name: $name, upstream: $upstream, workflows: {sync_upstream: $sync_wf}, intarweb_dev_present: $dev_present, _augmented: true}')
+              AUGMENTED=$(jq -c ". + [${ENTRY}]" <<< "$AUGMENTED")
+              echo "  + augmented: ${FORK} (sync_upstream=${SYNC_WF}, intarweb_dev=${DEV_PRESENT})"
+              ADDED=$((ADDED + 1))
+            fi
+          done < <(gh repo list intarweb --limit 100 --json name --jq '.[].name')
+
+          if [ "$ADDED" -gt 0 ]; then
+            AUG_PATH="/tmp/snapshot-augmented.json"
+            echo "$AUGMENTED" | jq '.' > "$AUG_PATH"
+            echo "  ✓ augmented snapshot: $(jq 'length' "$AUG_PATH") forks (+$ADDED live)"
+            SNAP="$AUG_PATH"
+          else
+            echo "  ✓ snapshot already current (no augmentation needed)"
+          fi
+          echo "snapshot=$SNAP" >> "$GITHUB_OUTPUT"
+
+      - name: 🔧 Heal M — IS_SOURCE_BUILT bootstrap (per-fork repo Variable)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          # The :latest contract: source-built forks get :latest from build-from-source.yml
+          # (= upstream-tracked-branch + every open author:terafin PR cherry-picked + ops
+          # overlay). Plain-mirror forks get :latest from fork-publish.yml (upstream-pristine
+          # passthrough). The IS_SOURCE_BUILT repo Variable is the single source of truth
+          # that gates fork-publish.yml's :latest block so it doesn't clobber bfs's output.
+          # Honest-fact #72.
+          #
+          # M auto-detects the right value per fork from the snapshot:
+          #   class != "plain-mirror" AND workflows.build_from_source == true → set true
+          #   class == "plain-mirror" OR build-from-source absent              → ensure unset
+          # Idempotent: PUT-Variable creates-or-updates; DELETE on already-absent is 404,
+          # silently swallowed. Safe to re-run every cycle.
+          SET=0
+          UNSET=0
+          # Process substitution (not `jq ... | while`) so counter increments
+          # survive into the parent shell. `jq | while` creates a subshell;
+          # SET/UNSET would always be 0 in the summary even when mutations fired.
+          # Honest-fact #77 (counter-loss foot-gun).
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+
+            # The truth signal for "is this fork source-built?" is the live
+            # build-from-source.yml workflow state — NOT snapshot file-presence
+            # (file-present is true even on plain-mirror forks where bfs is
+            # disabled_manually) and NOT the upstream-DH probe (over-fires on
+            # maximhq/bifrost, musistudio/claude-code-router etc that ARE on DH
+            # but we still source-build with carried PRs). Architect-12's dry-run
+            # caught both edge cases on v1.38.0/v1.38.1. Honest-fact #85.
+            #
+            # Decision: state==active → IS_SOURCE_BUILT=true. Anything else (file
+            # absent, disabled_manually, disabled_inactivity) → unset. Two-sweep
+            # latency for vllm-class re-enables: A re-enables sweep N, M sees
+            # active sweep N+1, K dispatches sweep N+1. Acceptable per #80.
+            WF_ID=$(gh api "repos/intarweb/${FORK}/actions/workflows" \
+              --jq '.workflows[] | select(.path | endswith("build-from-source.yml")) | .id' 2>/dev/null | head -1)
+            BFS_STATE=""
+            if [ -n "$WF_ID" ]; then
+              BFS_STATE=$(gh api "repos/intarweb/${FORK}/actions/workflows/${WF_ID}" --jq '.state' 2>/dev/null || echo "")
+            fi
+
+            if [ "$BFS_STATE" = "active" ]; then
+              WANT="true"
+            else
+              WANT="unset"
+            fi
+
+            # Read current value. Distinguish 404 (variable doesn't exist) from
+            # other failures (permission, rate limit, network). Mis-classifying
+            # non-404 as "unset" would fire a wrong CREATE/DELETE on retry.
+            # Use `if VAR=$(cmd)` form — `set -e` is suppressed in if-conditions,
+            # so the assignment doesn't kill the script on a 404 (which is an
+            # expected case for forks where IS_SOURCE_BUILT was never set).
+            # A bare `VAR=$(cmd)` would exit the whole step on the first 404.
+            if VAR_RESP=$(gh api "repos/intarweb/${FORK}/actions/variables/IS_SOURCE_BUILT" 2>&1); then
+              CUR=$(echo "$VAR_RESP" | jq -r '.value // ""')
+            elif echo "$VAR_RESP" | grep -q '"status":"404"'; then
+              CUR="__UNSET__"
+            else
+              # Real error (403/429/500/network) — skip this fork rather than
+              # mutate incorrectly. Log so it's visible in the run.
+              echo "  ${FORK}: API error reading IS_SOURCE_BUILT — skipping this sweep"
+              echo "    (response excerpt: $(echo "$VAR_RESP" | head -3 | tr '\n' ' '))"
+              continue
+            fi
+
+            # Operator-set false is sticky — DO NOT overwrite.
+            # v1.38.9 introduced the job-level `if: vars.IS_SOURCE_BUILT == 'true'`
+            # gate on build-from-source.yml, which means the workflow file stays
+            # installed on plain-mirror forks (uniform scaffolding) but the build
+            # job no-ops via the gate. For plain-mirror forks, IS_SOURCE_BUILT
+            # is an EXPLICIT OPERATOR DECISION (set to 'false') — not a derived
+            # value from workflow state. Heal-M's pre-v1.38.9 logic ("set true
+            # if workflow active, else unset") would clobber operator-set false
+            # back to true (since the workflow stays active per the new model),
+            # which then makes the gate fire on a fork with no Dockerfile and
+            # the build job errors out on missing Dockerfile.
+            # Burned 2026-06-11 on connect / SGM-Helper / docker-neo4j —
+            # heal-M's sweep flipped all three from operator-set false → true,
+            # next build-from-source run failed loudly with
+            # "failed to read dockerfile: open Dockerfile: no such file".
+            # Honest-fact #96.
+            if [ "$CUR" = "false" ]; then
+              continue
+            fi
+
+            if [ "$WANT" = "true" ] && [ "$CUR" != "true" ]; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "  [DRY_RUN] ${FORK}: would SET IS_SOURCE_BUILT=true (was: ${CUR})"
+              else
+                if [ "$CUR" = "__UNSET__" ]; then
+                  if gh api --method POST "repos/intarweb/${FORK}/actions/variables" \
+                       -f name=IS_SOURCE_BUILT -f value=true >/dev/null 2>&1; then
+                    echo "  ${FORK}: SET IS_SOURCE_BUILT=true (was unset)"
+                    SET=$((SET + 1))
+                  fi
+                else
+                  if gh api --method PATCH "repos/intarweb/${FORK}/actions/variables/IS_SOURCE_BUILT" \
+                       -f name=IS_SOURCE_BUILT -f value=true >/dev/null 2>&1; then
+                    echo "  ${FORK}: UPDATED IS_SOURCE_BUILT=true (was: ${CUR})"
+                    SET=$((SET + 1))
+                  fi
+                fi
+              fi
+            elif [ "$WANT" = "unset" ] && [ "$CUR" != "__UNSET__" ]; then
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "  [DRY_RUN] ${FORK}: would UNSET IS_SOURCE_BUILT (was: ${CUR}; bfs_state=${BFS_STATE:-missing})"
+              else
+                if gh api --method DELETE "repos/intarweb/${FORK}/actions/variables/IS_SOURCE_BUILT" >/dev/null 2>&1; then
+                  echo "  ${FORK}: UNSET IS_SOURCE_BUILT (was: ${CUR}; bfs_state=${BFS_STATE:-missing})"
+                  UNSET=$((UNSET + 1))
+                fi
+              fi
+            fi
+          done < <(jq -c '.[]' "$SNAP")
+
+          echo ""
+          echo "  total heal-M actions: SET=${SET} UNSET=${UNSET}"
+          {
+            echo "### Heal M — IS_SOURCE_BUILT bootstrap"
+            echo "- SET: ${SET}"
+            echo "- UNSET: ${UNSET}"
+            echo "- DRY_RUN: ${DRY_RUN}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🔧 Heal A — template drift
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          TEMPLATES="plugins/oss-contributing/skills/ghcr-fork-mirror/templates"
+          HEALED=0
+          # NEEDS_SYNC: space-separated fork names that received a canonical
+          # workflow push this sweep. After the loop completes, we
+          # workflow_dispatch sync-upstream on each — the dispatch bypasses the
+          # cadence gate, propagating canonical → intarweb-dev within minutes
+          # instead of waiting up to SYNC_CADENCE_HOURS hours for the next
+          # scheduled sync. Honest-fact #98 covers the docker-neo4j burn that
+          # motivated this.
+          NEEDS_SYNC=""
+
+          # Process substitution (not `jq ... | while`) so HEALED counter survives
+          # into the parent shell. See honest-fact #77.
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+            UPSTREAM_FULL=$(echo "$fork_json" | jq -r '.upstream')
+            UP_OWNER="${UPSTREAM_FULL%/*}"
+            UP_REPO="${UPSTREAM_FULL#*/}"
+
+            # Per-fork branches (re-fetch — snapshot may not have them)
+            DEFAULT=$(gh api "repos/intarweb/${FORK}" --jq '.default_branch')
+            # Per-fork upstream branch override via vars.SYNC_UPSTREAM_BRANCH.
+            # Defaults to upstream's default_branch (works for most). Override
+            # when upstream's default is the unstable lane (bifrost: dev branch
+            # ships broken commits between releases — but we still track dev,
+            # and we ship fix-PRs against it via the search-API discovery).
+            # Honest-fact #79. v1.38.4 fix: use explicit if-blocks instead of
+            # `cmd || cmd || echo` chain — gh api on 404 prints the error JSON
+            # body to stdout (only the human-readable suffix goes to stderr),
+            # so `||` chaining concatenated the JSON error WITH the fallback's
+            # output. Burned 2026-06-11 on intarweb/bifrost after v1.38.3 wrote
+            # the literal JSON `{"message":"Not Found",...}dev` into the workflow
+            # file at substitution time.
+            UPSTREAM_BRANCH=""
+            if VAR_RESP=$(gh api "repos/intarweb/${FORK}/actions/variables/SYNC_UPSTREAM_BRANCH" 2>&1); then
+              UPSTREAM_BRANCH=$(echo "$VAR_RESP" | jq -r '.value // ""')
+            fi
+            if [ -z "$UPSTREAM_BRANCH" ]; then
+              UPSTREAM_BRANCH=$(gh api "repos/${UP_OWNER}/${UP_REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
+            fi
+            if [ -z "$UPSTREAM_BRANCH" ]; then
+              UPSTREAM_BRANCH="main"
+            fi
+
+            # bfs-heal gate: skip heal-templating build-from-source.yml on forks
+            # where it does not apply. Two signals (architect-13 cleanup, v1.38.6):
+            #
+            #   UPSTREAM_HAS_DH: fork carries an UPSTREAM_IMAGE variable. That var
+            #   only exists on plain-mirror forks where the DH path differs from the
+            #   GH path (acmesh-official/acme.sh GH → neilpang/acme.sh DH; apache/
+            #   tika-docker GH → apache/tika DH). Its existence IS the plain-mirror
+            #   signal. Use `if VAR=$(gh api ...)` to be set -e safe (honest-fact #83).
+            #
+            #   SKIP_BFS_HEAL_FORK: explicit per-fork escape hatch for forks that
+            #   intentionally carry a non-canonical build-from-source.yml (e.g.
+            #   intarweb/claude-code-router, which uses a custom pnpm/smoke-test/
+            #   promote-latest pattern that diverges from the universal template).
+            #   Without this, Heal A would overwrite the custom bfs every sweep.
+            #
+            # Previously: probe 1 (curl DH at GH-path) over-fired on maximhq/bifrost,
+            # musistudio/claude-code-router, runatlantis/atlantis (all on DH at GH
+            # path AND we still source-build). Probe 3 (library/IMAGE_NAME on DH)
+            # became architectural dust after Heal M switched to workflow-state-based
+            # logic; removed in v1.38.6. Honest-facts #84, #85, #87.
+            UPSTREAM_HAS_DH=false
+            if VAR_RESP=$(gh api "repos/intarweb/${FORK}/actions/variables/UPSTREAM_IMAGE" 2>&1); then
+              UPSTREAM_HAS_DH=true
+            fi
+            SKIP_BFS_HEAL_FORK=false
+            if VAR_RESP=$(gh api "repos/intarweb/${FORK}/actions/variables/SKIP_BFS_HEAL" 2>&1); then
+              SKIP_VAL=$(echo "$VAR_RESP" | jq -r '.value // ""')
+              if [ "$SKIP_VAL" = "true" ]; then
+                SKIP_BFS_HEAL_FORK=true
+              fi
+            fi
+
+            for TPL_NAME in sync-upstream.yml build-from-source.yml fork-publish.yml update-fork-info.yml fold-on-push.yml; do
+              TPL_FILE="${TEMPLATES}/${TPL_NAME}"
+              [ -f "$TPL_FILE" ] || continue
+
+              # Skip build-from-source.yml on truly plain-mirror forks (no file
+              # exists on disk) OR explicit per-fork SKIP_BFS_HEAL opt-out.
+              # The old UPSTREAM_HAS_DH heuristic was wrong: forks like
+              # tika-docker have UPSTREAM_IMAGE set (fork-publish mirrors apache/tika
+              # Docker Hub tags) AND ALSO source-build :latest with our patches
+              # because upstream's Dockerfile declares ARG TIKA_VERSION with no
+              # default. UPSTREAM_HAS_DH alone misclassified hybrid forks as
+              # plain-mirror and silently stopped healing their build-from-source.yml.
+              # Burned 2026-06-11 on tika-docker: BUILD_ARGS template addition
+              # never reached it because heal-A skipped on UPSTREAM_HAS_DH=true.
+              # New rule: presence of build-from-source.yml ON THE FORK is the
+              # signal. If the file isn't there, the fork is truly plain-mirror.
+              if [ "$TPL_NAME" = "build-from-source.yml" ]; then
+                if [ "$SKIP_BFS_HEAL_FORK" = "true" ]; then
+                  continue
+                fi
+                # Check if the file exists on the fork at all
+                if ! gh api "repos/intarweb/${FORK}/contents/.github/workflows/build-from-source.yml" >/dev/null 2>&1; then
+                  # Truly plain-mirror — no source build workflow installed
+                  continue
+                fi
+              fi
+
+              # Workflow-state heal: if the file exists on the fork but the workflow
+              # is disabled (either manually OR by GitHub's 60-day-inactive auto-
+              # disable on forks), re-enable it. Heal A is the authoritative
+              # re-installer; that contract extends to runtime state, not just file
+              # content. Burned 2026-06-10 on vllm (build-from-source.yml present
+              # but disabled, so :latest stopped getting source builds → fork-publish's
+              # upstream-pristine mirror persisted unopposed). Honest-fact #73.
+              # The plain-mirror skip above already prevents this from firing on
+              # tika-docker-class forks (it continues out before reaching here).
+              WF_ID=$(gh api "repos/intarweb/${FORK}/actions/workflows" \
+                --jq ".workflows[] | select(.path | endswith(\"${TPL_NAME}\")) | .id" 2>/dev/null | head -1)
+              if [ -n "$WF_ID" ]; then
+                WF_STATE=$(gh api "repos/intarweb/${FORK}/actions/workflows/${WF_ID}" --jq '.state' 2>/dev/null || echo "")
+                # Match BOTH disabled states. `disabled_manually` is operator-driven;
+                # `disabled_inactivity` is GitHub's auto-disable on forks inactive >60d
+                # (the lazier killer — and arguably more common on quiet forks).
+                if [ "$WF_STATE" = "disabled_manually" ] || [ "$WF_STATE" = "disabled_inactivity" ]; then
+                  if [ "$DRY_RUN" = "true" ]; then
+                    echo "  [DRY_RUN] ${FORK}: ${TPL_NAME} ${WF_STATE} — would re-enable"
+                  else
+                    echo "  ${FORK}: ${TPL_NAME} ${WF_STATE} — re-enabling"
+                    gh api --method PUT "repos/intarweb/${FORK}/actions/workflows/${WF_ID}/enable" >/dev/null 2>&1 \
+                      && echo "    ✓ enabled" \
+                      || echo "    ✗ enable failed"
+                    HEALED=$((HEALED + 1))
+                  fi
+                fi
+              fi
+
+              # Substitute canonical content
+              CANON=$(sed \
+                -e "s|__UPSTREAM_OWNER__|${UP_OWNER}|g" \
+                -e "s|__UPSTREAM_REPO__|${UP_REPO}|g" \
+                -e "s|__UPSTREAM_BRANCH__|${UPSTREAM_BRANCH}|g" \
+                -e "s|__DEPLOY_BRANCH__|intarweb-dev|g" \
+                -e "s|__DEFAULT_BRANCH__|${DEFAULT}|g" \
+                "$TPL_FILE")
+
+              # Get current content (may not exist for forks where workflow was deleted)
+              CUR_RESP=$(gh api "repos/intarweb/${FORK}/contents/.github/workflows/${TPL_NAME}" 2>/dev/null || echo '{}')
+              CUR_SHA=$(echo "$CUR_RESP" | jq -r '.sha // ""')
+              if [ -n "$CUR_SHA" ]; then
+                CUR=$(echo "$CUR_RESP" | jq -r '.content' | base64 -d)
+              else
+                CUR=""
+              fi
+
+              if [ "$CUR" = "$CANON" ]; then
+                continue   # in sync, no action
+              fi
+
+              # If file doesn't exist on fork, PUT it. Updated 2026-06-09: previous
+              # behavior was to skip missing workflows ("operator decision"), but
+              # that broke recovery after sync-upstream's hard-reset accidentally
+              # deleted workflows from main. The 4 canonical workflows are
+              # ALWAYS expected to exist on Model B forks — Heal A is the
+              # authoritative re-installer.
+              echo "  ${FORK}: ${TPL_NAME} $([ -z "$CUR_SHA" ] && echo "MISSING — installing" || echo "drift detected — pushing canonical")"
+              if [ "$DRY_RUN" = "true" ]; then
+                echo "    [DRY_RUN] would PUT canonical content (skip)"
+              else
+                CONTENT_B64=$(echo "$CANON" | base64 | tr -d '\n')
+                jq -nc \
+                  --arg msg "auto-heal: re-sync ${TPL_NAME} from canonical template" \
+                  --arg content "$CONTENT_B64" --arg sha "$CUR_SHA" --arg branch "$DEFAULT" \
+                  'if $sha == "" then {message:$msg, content:$content, branch:$branch}
+                   else {message:$msg, content:$content, sha:$sha, branch:$branch} end' > /tmp/heal.json
+                gh api --method PUT "repos/intarweb/${FORK}/contents/.github/workflows/${TPL_NAME}" \
+                  --input /tmp/heal.json --jq '.commit.sha' | sed "s/^/    /"
+                HEALED=$((HEALED + 1))
+                # Mark this fork as needing sync-upstream propagation. Heal-A
+                # pushes canonical workflow content to the fork's DEFAULT
+                # branch only. Sync-upstream then propagates default → intarweb-dev
+                # via "git checkout -B intarweb-dev master" in the regen step.
+                # BUT sync-upstream is cadence-gated (SYNC_CADENCE_HOURS,
+                # default 1h, set higher on slow upstreams — docker-neo4j is
+                # 6h). If a sync ran recently, the cadence gate skips
+                # propagation; intarweb-dev stays stale with the OLD canonical
+                # while master has the NEW one. Build-from-source.yml fires
+                # on intarweb-dev and runs the stale logic — for v1.38.9+ this
+                # means missing the IS_SOURCE_BUILT gate and erroring on
+                # plain-mirror forks.
+                # Burned 2026-06-12 on docker-neo4j: 12 failed builds across
+                # ~10 hours because heal-A pushed v1.38.9 canonical at 23:40
+                # but the next cadence-eligible sync wasn't until 03:20.
+                # Fix: collect every fork heal-A wrote to, then workflow_dispatch
+                # sync-upstream on each (dispatch bypasses cadence gate).
+                # Honest-fact #98.
+                NEEDS_SYNC="$NEEDS_SYNC $FORK"
+              fi
+            done
+          done < <(jq -c '.[] | select(.workflows.sync_upstream == true and .intarweb_dev_present == true)' "$SNAP")
+
+          # Dispatch sync-upstream on every fork heal-A modified, dedupe first.
+          if [ -n "${NEEDS_SYNC:-}" ]; then
+            echo ""
+            echo "  dispatching sync-upstream to propagate canonical → intarweb-dev (bypasses cadence):"
+            for FORK in $(printf '%s\n' $NEEDS_SYNC | sort -u); do
+              if gh workflow run sync-upstream.yml --repo "intarweb/${FORK}" >/dev/null 2>&1; then
+                echo "    ✓ ${FORK}"
+              else
+                echo "    ✗ ${FORK} (dispatch failed — fork will pick up canonical on next cadence)"
+              fi
+            done
+          fi
+
+          echo ""
+          echo "  total heal-A actions: ${HEALED}"
+          {
+            echo "### Heal A — template drift + workflow-state"
+            echo "- Total actions: ${HEALED:-0}"
+            echo "- DRY_RUN: ${DRY_RUN}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🔧 Heal K — kick stale :latest (intarweb-dev > image)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          # Workflow-enable propagation (disabled → active) takes 5-30 seconds on GitHub's
+          # backend. If Heal A just re-enabled build-from-source.yml on a fork in this
+          # sweep, an immediate workflow_dispatch returns 422 ("Workflow does not have
+          # 'workflow_dispatch' trigger"). 30s sleep covers the propagation window.
+          # Honest-fact #74.
+          echo "  sleeping 30s for any Heal A workflow-enable propagation..."
+          sleep 30
+
+          # For each source-built fork: if intarweb-dev's tip commit timestamp is newer
+          # than the :latest digest's created_at, dispatch build-from-source.yml.
+          # Why created_at and NOT updated_at: updated_at reflects re-tag events
+          # (Heal E pins, imagetools retags), not the original push. Using created_at
+          # gives "when was this digest built" which is the correct comparison.
+          # Honest-fact #75.
+          #
+          # Dedup: skip if there's already an in-progress build for this repo.
+          # Without this, K + sync-upstream's auto-trigger can each dispatch and
+          # both queue (concurrency: cancel-in-progress: false). Wastes runner-min.
+          # Process substitution so KICKED counter survives. See honest-fact #77.
+          KICKED=0
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+
+            # Heal K only applies to source-built forks
+            IS_SB=$(gh api "repos/intarweb/${FORK}/actions/variables/IS_SOURCE_BUILT" --jq '.value' 2>/dev/null || echo "")
+            [ "$IS_SB" != "true" ] && continue
+
+            # Image name (lowercased)
+            IMG=$(gh api "repos/intarweb/${FORK}/actions/variables/IMAGE_NAME" --jq '.value' 2>/dev/null || echo "$FORK")
+            PKG=$(echo "$IMG" | tr '[:upper:]' '[:lower:]')
+
+            # intarweb-dev tip commit timestamp
+            COMMIT_TS=$(gh api "repos/intarweb/${FORK}/branches/intarweb-dev" --jq '.commit.commit.author.date' 2>/dev/null || echo "")
+            [ -z "$COMMIT_TS" ] && continue
+
+            # :latest digest created_at (NOT updated_at — see comment above)
+            IMG_TS=$(gh api "/orgs/intarweb/packages/container/${PKG}/versions?per_page=50" --paginate \
+              --jq 'first(.[] | select((.metadata.container.tags // []) | index("latest"))) | .created_at' 2>/dev/null || echo "")
+
+            if [ -z "$IMG_TS" ]; then
+              # :latest doesn't exist yet — definitely needs a build
+              REASON="no :latest tag yet"
+            else
+              # Compare timestamps (epoch seconds). Fail-safe: if `date -d` can't
+              # parse the commit timestamp (which would normally fall back to 0
+              # → CTS <= ITS → silently treat as fresh → never kick), force CTS
+              # to a huge sentinel so we kick a build instead of silently doing
+              # nothing. Better to over-build than under-build. Honest-fact #78.
+              CTS=$(date -d "$COMMIT_TS" +%s 2>/dev/null || echo 99999999999)
+              ITS=$(date -d "$IMG_TS" +%s 2>/dev/null || echo 0)
+              if [ "$CTS" -le "$ITS" ]; then
+                continue   # image is fresh
+              fi
+              AGE_DELTA=$(( CTS - ITS ))
+              REASON="commit newer than image by ${AGE_DELTA}s"
+            fi
+
+            # Dedup: skip if a build is already in-progress
+            IN_PROG=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml \
+              --status in_progress --limit 1 --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null)
+            if [ -n "$IN_PROG" ]; then
+              echo "  ${FORK}: stale (${REASON}) BUT build ${IN_PROG} in-progress — skipping (dedup)"
+              continue
+            fi
+
+            # Also dedup against queued (concurrency-blocked) runs
+            QUEUED=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml \
+              --status queued --limit 1 --json databaseId --jq '.[0].databaseId // ""' 2>/dev/null)
+            if [ -n "$QUEUED" ]; then
+              echo "  ${FORK}: stale (${REASON}) BUT build ${QUEUED} queued — skipping (dedup)"
+              continue
+            fi
+
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "  [DRY_RUN] ${FORK}: ${REASON} — would dispatch build-from-source.yml on intarweb-dev"
+            else
+              echo "  ${FORK}: ${REASON} — dispatching build-from-source.yml on intarweb-dev"
+              if gh workflow run build-from-source.yml --repo "intarweb/${FORK}" --ref intarweb-dev >/dev/null 2>&1; then
+                echo "    ✓ dispatched"
+                KICKED=$((KICKED + 1))
+              else
+                echo "    ✗ dispatch failed (likely workflow_dispatch propagation race; next sweep retries)"
+              fi
+            fi
+          done < <(jq -c '.[] | select(.class != "plain-mirror" and .workflows.build_from_source == true and .intarweb_dev_present == true)' "$SNAP")
+
+          echo ""
+          echo "  total heal-K actions: ${KICKED}"
+          {
+            echo "### Heal K — kick stale :latest"
+            echo "- Total dispatches: ${KICKED}"
+            echo "- DRY_RUN: ${DRY_RUN}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 🔧 Heal B — failure retry (>1h old)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          NOW=$(date -u +%s)
+          RETRIED=0
+
+          # For each fork with failed sync OR failed build, re-dispatch IF the failure
+          # is older than 1h (avoids retry loops on real bugs that just failed).
+          # Process substitution (not pipe-into-while) so RETRIED counter survives.
+          # Honest-fact #77.
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+            SYNC_FAIL=$(echo "$fork_json" | jq -r '.sync_conclusion == "failure"')
+            BUILD_FAIL=$(echo "$fork_json" | jq -r '.build_conclusion == "failure"')
+            DEFAULT=$(gh api "repos/intarweb/${FORK}" --jq '.default_branch')
+
+            if [ "$SYNC_FAIL" = "true" ]; then
+              LAST_SYNC=$(gh run list --repo "intarweb/${FORK}" --workflow sync-upstream.yml --limit 1 --json updatedAt --jq '.[0].updatedAt // ""')
+              if [ -n "$LAST_SYNC" ]; then
+                # Date fail-safe: if `date -d` can't parse the timestamp (rare but
+                # possible on fractional-second variants), force AGE huge so retry
+                # fires. Old behavior (`|| echo "$NOW"`) made AGE=0 → "too fresh"
+                # → permanent suppression. Same fail-safe pattern as Heal K. #78.
+                LAST_TS=$(date -d "$LAST_SYNC" +%s 2>/dev/null || echo 0)
+                AGE=$(( NOW - LAST_TS ))
+                if [ "$AGE" -gt 3600 ]; then
+                  echo "  ${FORK}: sync failure ${AGE}s old — re-dispatching"
+                  gh workflow run sync-upstream.yml --repo "intarweb/${FORK}" --ref "$DEFAULT" >/dev/null 2>&1 || echo "    (dispatch failed)"
+                  RETRIED=$((RETRIED + 1))
+                else
+                  echo "  ${FORK}: sync failure only ${AGE}s old — too fresh to retry (skipping to avoid loop)"
+                fi
+              fi
+            fi
+
+            if [ "$BUILD_FAIL" = "true" ]; then
+              # Skip if build-from-source.yml doesn't exist (deleted = intentional)
+              if ! gh api "repos/intarweb/${FORK}/contents/.github/workflows/build-from-source.yml" >/dev/null 2>&1; then
+                continue
+              fi
+              LAST_BUILD=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml --limit 1 --json updatedAt --jq '.[0].updatedAt // ""')
+              if [ -n "$LAST_BUILD" ]; then
+                LAST_TS=$(date -d "$LAST_BUILD" +%s 2>/dev/null || echo 0)
+                AGE=$(( NOW - LAST_TS ))
+                if [ "$AGE" -gt 3600 ]; then
+                  echo "  ${FORK}: build failure ${AGE}s old — re-dispatching on intarweb-dev"
+                  gh workflow run build-from-source.yml --repo "intarweb/${FORK}" --ref intarweb-dev >/dev/null 2>&1 || echo "    (dispatch failed)"
+                  RETRIED=$((RETRIED + 1))
+                fi
+              fi
+            fi
+          done < <(jq -c '.[] | select(.sync_conclusion == "failure" or .build_conclusion == "failure")' "$SNAP")
+
+          echo ""
+          echo "  total heal-B actions: ${RETRIED}"
+
+      - name: 🔧 Heal D — auto-bootstrap new forks (opt-in via 'auto-bootstrap' topic)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          BOOTSTRAPPED=0
+
+          # Default policy (2026-06-09): any fork in intarweb classified as 'other' or
+          # 'plain-mirror' that has a Dockerfile somewhere reachable gets auto-bootstrapped
+          # to Model B. No opt-out gate — under "any fork in intarweb is meant for Model B"
+          # the gate was dead weight. If a real edge case arises, add a topic check then.
+          # Process substitution (not pipe-into-while) so BOOTSTRAPPED counter survives. #77.
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+            UPSTREAM_FULL=$(echo "$fork_json" | jq -r '.upstream')
+            [ "$UPSTREAM_FULL" = "unknown" ] && continue
+
+            # Sanity check: only auto-bootstrap if there's a Dockerfile somewhere reachable.
+            # (Otherwise build-from-source has nothing to build and we churn for no reason.)
+            DEFAULT=$(gh api "repos/intarweb/${FORK}" --jq '.default_branch')
+            TREE_SHA=$(gh api "repos/intarweb/${FORK}/git/ref/heads/${DEFAULT}" --jq '.object.sha' 2>/dev/null || echo "")
+            HAS_DOCKERFILE=false
+            if [ -n "$TREE_SHA" ]; then
+              if gh api "repos/intarweb/${FORK}/git/trees/${TREE_SHA}?recursive=1" \
+                 --jq '[.tree[] | select(.type == "blob" and (.path | endswith("/Dockerfile") or . == "Dockerfile"))] | length' \
+                 | grep -qE '^[1-9]'; then
+                HAS_DOCKERFILE=true
+              fi
+            fi
+            if [ "$HAS_DOCKERFILE" = "false" ]; then
+              echo "  ${FORK}: no Dockerfile in tree — skipping auto-bootstrap"
+              continue
+            fi
+
+            echo "  ${FORK}: auto-bootstrapping to Model B"
+
+            UP_OWNER="${UPSTREAM_FULL%/*}"
+            UP_REPO="${UPSTREAM_FULL#*/}"
+            # Per-fork upstream branch override via vars.SYNC_UPSTREAM_BRANCH.
+            # Defaults to upstream's default_branch (works for most). Override
+            # when upstream's default is the unstable lane (bifrost: dev branch
+            # ships broken commits between releases — but we still track dev,
+            # and we ship fix-PRs against it via the search-API discovery).
+            # Honest-fact #79. v1.38.4 fix: use explicit if-blocks instead of
+            # `cmd || cmd || echo` chain — gh api on 404 prints the error JSON
+            # body to stdout (only the human-readable suffix goes to stderr),
+            # so `||` chaining concatenated the JSON error WITH the fallback's
+            # output. Burned 2026-06-11 on intarweb/bifrost after v1.38.3 wrote
+            # the literal JSON `{"message":"Not Found",...}dev` into the workflow
+            # file at substitution time.
+            UPSTREAM_BRANCH=""
+            if VAR_RESP=$(gh api "repos/intarweb/${FORK}/actions/variables/SYNC_UPSTREAM_BRANCH" 2>&1); then
+              UPSTREAM_BRANCH=$(echo "$VAR_RESP" | jq -r '.value // ""')
+            fi
+            if [ -z "$UPSTREAM_BRANCH" ]; then
+              UPSTREAM_BRANCH=$(gh api "repos/${UP_OWNER}/${UP_REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
+            fi
+            if [ -z "$UPSTREAM_BRANCH" ]; then
+              UPSTREAM_BRANCH="main"
+            fi
+
+            # Create intarweb-dev if absent
+            if ! gh api "repos/intarweb/${FORK}/branches/intarweb-dev" >/dev/null 2>&1; then
+              SHA=$(gh api "repos/intarweb/${FORK}/git/ref/heads/${DEFAULT}" --jq '.object.sha')
+              gh api -X POST "repos/intarweb/${FORK}/git/refs" \
+                -f ref="refs/heads/intarweb-dev" -f sha="$SHA" >/dev/null
+              echo "    ✓ created intarweb-dev"
+            fi
+
+            # Push 4 canonical workflows (substituted)
+            # ...except: SKIP build-from-source.yml when upstream publishes its
+            # own image to Docker Hub. Plain-mirror pattern: fork-publish mirrors
+            # upstream's official image, build-from-source has nothing to add and
+            # would just churn-fail (most have non-root Dockerfiles, multi-stage
+            # build matrices, etc — judgment call we can't auto-resolve).
+            # Discovered 2026-06-09 with neo4j/tika/alpine/vllm.
+            UPSTREAM_HAS_DH=false
+            # Probe 1: <owner>/<repo> on Docker Hub.
+            DH_PATH="${UP_OWNER}/${UP_REPO}"
+            if curl -sf -o /dev/null "https://hub.docker.com/v2/repositories/${DH_PATH,,}/"; then
+              UPSTREAM_HAS_DH=true
+              echo "    upstream publishes ${DH_PATH,,} to Docker Hub — skipping build-from-source.yml install"
+            fi
+            # Probe 2: UPSTREAM_IMAGE override variable.
+            if [ "$UPSTREAM_HAS_DH" = "false" ]; then
+              if gh api "repos/intarweb/${FORK}/actions/variables/UPSTREAM_IMAGE" >/dev/null 2>&1; then
+                UPSTREAM_HAS_DH=true
+                echo "    UPSTREAM_IMAGE variable set — skipping build-from-source.yml install"
+              fi
+            fi
+            # Probe 3: library/IMAGE_NAME on Docker Hub (Docker Official Images).
+            if [ "$UPSTREAM_HAS_DH" = "false" ]; then
+              IMG_NAME=$(gh api "repos/intarweb/${FORK}/actions/variables/IMAGE_NAME" --jq '.value' 2>/dev/null || echo "")
+              if [ -n "$IMG_NAME" ] && [ "$IMG_NAME" != "$FORK" ]; then
+                if curl -sf -o /dev/null "https://hub.docker.com/v2/repositories/library/${IMG_NAME,,}/"; then
+                  UPSTREAM_HAS_DH=true
+                  echo "    library/${IMG_NAME,,} on Docker Hub — skipping build-from-source.yml install"
+                fi
+              fi
+            fi
+
+            TEMPLATES="plugins/oss-contributing/skills/ghcr-fork-mirror/templates"
+            for TPL in sync-upstream.yml build-from-source.yml fork-publish.yml update-fork-info.yml fold-on-push.yml; do
+              # Skip build-from-source on upstreams that already publish to DH
+              if [ "$TPL" = "build-from-source.yml" ] && [ "$UPSTREAM_HAS_DH" = "true" ]; then
+                continue
+              fi
+              CONTENT=$(sed \
+                -e "s|__UPSTREAM_OWNER__|${UP_OWNER}|g" \
+                -e "s|__UPSTREAM_REPO__|${UP_REPO}|g" \
+                -e "s|__UPSTREAM_BRANCH__|${UPSTREAM_BRANCH}|g" \
+                -e "s|__DEPLOY_BRANCH__|intarweb-dev|g" \
+                -e "s|__DEFAULT_BRANCH__|${DEFAULT}|g" \
+                "${TEMPLATES}/${TPL}" | base64 | tr -d '\n')
+              CUR_SHA=$(gh api "repos/intarweb/${FORK}/contents/.github/workflows/${TPL}" --jq '.sha' 2>/dev/null || echo "")
+              jq -nc \
+                --arg msg "auto-bootstrap: install ${TPL} (Heal D)" \
+                --arg content "$CONTENT" --arg sha "$CUR_SHA" --arg branch "$DEFAULT" \
+                'if $sha == "" then {message:$msg, content:$content, branch:$branch}
+                 else {message:$msg, content:$content, sha:$sha, branch:$branch} end' > /tmp/d.json
+              gh api --method PUT "repos/intarweb/${FORK}/contents/.github/workflows/${TPL}" \
+                --input /tmp/d.json --jq '.commit.sha[0:8]' | sed "s/^/    ${TPL}: /"
+            done
+
+            BOOTSTRAPPED=$((BOOTSTRAPPED + 1))
+
+            # Dispatch sync-upstream once — GitHub doesn't honor `schedule:` on
+            # fresh forks until at least one manual/dispatch run registers it.
+            # Without this, intarweb-dev stays equal to default branch forever.
+            # (Heal H also covers this for any fork that slipped through.)
+            gh workflow run sync-upstream.yml --repo "intarweb/${FORK}" --ref "$DEFAULT" >/dev/null 2>&1 \
+              && echo "    ✓ dispatched first sync (registers schedule)" \
+              || echo "    ⚠ first-sync dispatch failed (Heal H will retry next cycle)"
+          done < <(jq -c '.[] | select(.class == "other" or .class == "plain-mirror")' "$SNAP")
+
+          echo ""
+          echo "  total heal-D actions: ${BOOTSTRAPPED}"
+
+      - name: 🔧 Heal H — kick scheduled-but-never-ran sync-upstream
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # GitHub Actions silently disables `schedule:` on forks until the
+          # workflow has been triggered at least once (manual / dispatch / push).
+          # bootstrap-fork.sh handles this for new forks; Heal D's bootstrap
+          # also dispatches. But any fork whose sync workflow was committed
+          # via a path that DIDN'T dispatch (early forks, direct PUTs, etc)
+          # ends up with a workflow file that exists but never fires. Symptom:
+          # intarweb-dev stays equal to default branch, overlay/build sees no
+          # diff, packages drift. Discovered 2026-06-09 — 6 forks affected.
+          #
+          # Heal: for any fork with sync-upstream.yml present and total_count
+          # of 0, fire a workflow_dispatch. After one successful dispatch the
+          # schedule registers, so this is naturally one-shot per fork.
+          KICKED=0
+          for FORK in $(gh api 'orgs/intarweb/repos?per_page=100' --jq '.[].name'); do
+            # Find the sync-upstream workflow id (path-matched, name-agnostic)
+            WF_ID=$(gh api "repos/intarweb/${FORK}/actions/workflows" \
+              --jq '.workflows[] | select(.path | endswith("sync-upstream.yml")) | .id' 2>/dev/null | head -1)
+            [ -z "$WF_ID" ] && continue
+            COUNT=$(gh api "repos/intarweb/${FORK}/actions/workflows/${WF_ID}/runs?per_page=1" \
+              --jq '.total_count' 2>/dev/null || echo "")
+            if [ "$COUNT" = "0" ]; then
+              DEFAULT=$(gh api "repos/intarweb/${FORK}" --jq '.default_branch')
+              if gh workflow run sync-upstream.yml --repo "intarweb/${FORK}" --ref "$DEFAULT" 2>/dev/null; then
+                echo "  ${FORK}: 0 runs ever — dispatched (schedule should now register)"
+                KICKED=$((KICKED + 1))
+              else
+                echo "  ${FORK}: 0 runs ever — dispatch FAILED"
+              fi
+            fi
+          done
+          echo ""
+          echo "  total heal-H actions: ${KICKED:-0}"
+
+      - name: 🔧 Heal F — disable upstream-native publish workflows
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          DISABLED=0
+          # On every fork, find any active workflow whose name suggests publishing
+          # (and isn't one of our 5 canonical ones). Disable it. Upstream-native
+          # publish workflows compete with our canonical 5 — they either fail noisily
+          # or clobber our images. Honest-fact #58.
+          # Process substitution at both levels so DISABLED counter survives. #77.
+          while read -r FORK; do
+            while read -r WID WPATH; do
+                NAME="${WPATH##*/}"
+                case "$NAME" in
+                  sync-upstream.yml|build-from-source.yml|fork-publish.yml|update-fork-info.yml|fold-on-push.yml) continue ;;
+                esac
+                if echo "$NAME" | grep -qiE 'publish|^release\.|deploy|continuous-delivery|promote|^github-build|^helm-release|^npx-publish|^build\.yaml|release-pipeline|release-cli|continuous-integration|github-registry|generate-upload-dxt'; then
+                  # Confirm disable via the workflow's state, not a stderr grep
+                  # (the prior `gh workflow disable | grep "disabled"` matched both
+                  # success messages AND "already disabled" errors → false positives).
+                  if gh workflow disable "$WID" --repo "intarweb/${FORK}" >/dev/null 2>&1; then
+                    NEW_STATE=$(gh api "repos/intarweb/${FORK}/actions/workflows/${WID}" --jq '.state' 2>/dev/null || echo "")
+                    if [ "$NEW_STATE" = "disabled_manually" ]; then
+                      echo "  ${FORK}/${NAME}: disabled"
+                      DISABLED=$((DISABLED + 1))
+                    fi
+                  fi
+                fi
+            done < <(gh api "repos/intarweb/${FORK}/actions/workflows" \
+                       --jq '.workflows[] | select(.state == "active") | "\(.id) \(.path)"' 2>/dev/null)
+          done < <(gh api 'orgs/intarweb/repos?per_page=100' --jq '.[].name')
+          echo ""
+          echo "  total heal-F actions: ${DISABLED}"
+
+      - name: 🐳 Setup buildx + login to ghcr (for Heal E)
+        uses: docker/setup-buildx-action@v3
+      - name: 🔑 ghcr login (for Heal E)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: intarweb-sync-bot[bot]
+          password: ${{ steps.app-token.outputs.token }}
+
+      - name: 🔧 Heal E — pin :latest to last-good on persistent build failure
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          SNAP="${{ steps.snap.outputs.snapshot }}"
+          [ -z "$SNAP" ] && exit 0
+
+          PINNED=0
+
+          # For each fork with build_conclusion == failure, check if last 3 builds all
+          # failed. If so, find the most recent successful build SHA and pin :latest.
+          # Process substitution so PINNED counter survives. #77.
+          while read -r fork_json; do
+            FORK=$(echo "$fork_json" | jq -r '.name')
+
+            # Get last 5 build runs
+            RECENT=$(gh run list --repo "intarweb/${FORK}" --workflow build-from-source.yml \
+              --limit 5 --json conclusion,headSha --jq '[.[] | {conclusion, headSha}]')
+            FAILS=$(echo "$RECENT" | jq '[.[0:3] | .[] | select(.conclusion == "failure")] | length')
+
+            if [ "$FAILS" -lt 3 ]; then
+              continue   # not yet at threshold
+            fi
+
+            # Find most recent successful build
+            LAST_GOOD=$(echo "$RECENT" | jq -r '[.[] | select(.conclusion == "success")] | .[0].headSha // ""' | head -c 7)
+            if [ -z "$LAST_GOOD" ]; then
+              echo "  ${FORK}: 3+ consecutive failures, but NO successful build in last 5 to pin to — manual intervention needed"
+              continue
+            fi
+
+            CURRENT_LATEST=$(gh api "/orgs/intarweb/packages/container/${FORK,,}/versions?per_page=10" \
+              --jq '[.[] | select(.metadata.container.tags | index("latest")) | .metadata.container.tags[]] | .[0]' 2>/dev/null || echo "")
+
+            if [ "$CURRENT_LATEST" = "sha-${LAST_GOOD}" ]; then
+              continue   # already pinned correctly
+            fi
+
+            echo "  ${FORK}: 3+ build failures — pinning :latest to sha-${LAST_GOOD} (was: ${CURRENT_LATEST:-unknown})"
+            # Use buildx imagetools to repoint the tag — runs on the action runner
+            docker buildx imagetools create \
+              --tag "ghcr.io/intarweb/${FORK,,}:latest" \
+              "ghcr.io/intarweb/${FORK,,}:sha-${LAST_GOOD}" 2>&1 | sed 's/^/    /'
+
+            PINNED=$((PINNED + 1))
+          done < <(jq -c '.[] | select(.build_conclusion == "failure" and .workflows.build_from_source == true)' "$SNAP")
+
+          echo ""
+          echo "  total heal-E actions: ${PINNED}"
+
+      - name: 🔧 Heal G — prune untagged package versions older than 14 days
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # GHCR accumulates orphan untagged versions from every build push (each
+          # push creates a new digest, then tag retags to it; old digests linger
+          # untagged). Without cleanup, packages bloat — cloudflare-ddns hit 477
+          # untagged orphans before this Heal G was added (2026-06-09).
+          #
+          # Policy: any untagged version older than 14 days = orphan, delete.
+          # Tagged versions never touched here (those are intentional pins).
+          #
+          # Note: the org-level packages endpoint (GET /orgs/X/packages) returns
+          # HTTP 400 for GitHub App installation tokens — listing all org
+          # packages is user-OAuth-only. Workaround: iterate by repo and use
+          # the IMAGE_NAME repo Variable (or repo name) as package name.
+          DELETED=0
+          CUTOFF=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+                   || python3 -c "import datetime;print((datetime.datetime.utcnow() - datetime.timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+          echo "  cutoff: $CUTOFF (versions older than this AND untagged → delete)"
+
+          # Get the list of forks from the snapshot (already loaded above)
+          for FORK in $(jq -r '.[].name' "${{ steps.snap.outputs.snapshot }}"); do
+            # Determine package name: IMAGE_NAME repo Variable wins, else lowercased repo name
+            IMG_VAR=""
+            if gh api "repos/intarweb/${FORK}/actions/variables/IMAGE_NAME" >/dev/null 2>&1; then
+              IMG_VAR=$(gh api "repos/intarweb/${FORK}/actions/variables/IMAGE_NAME" --jq '.value')
+            fi
+            PKG=$(echo "${IMG_VAR:-$FORK}" | tr '[:upper:]' '[:lower:]')
+
+            # Skip if package doesn't exist (some forks don't publish — SGM-Helper etc)
+            if ! gh api "orgs/intarweb/packages/container/${PKG}" >/dev/null 2>&1; then
+              continue
+            fi
+
+            PKG_DELETED=0
+            for PAGE in 1 2 3 4 5 6 7 8 9 10; do
+              VERSIONS=$(gh api "/orgs/intarweb/packages/container/${PKG}/versions?per_page=100&page=${PAGE}" 2>/dev/null)
+              # Shell-precedence fix: `[ A ] || [ B ] && break` parses as
+              # `[ A ] || ( [ B ] && break )` — when A is true the break short-
+              # circuits and never runs. Use explicit `{ ...; }` group instead.
+              if [ -z "$VERSIONS" ] || [ "$VERSIONS" = "[]" ]; then
+                break
+              fi
+              IDS=$(echo "$VERSIONS" | jq -r --arg cutoff "$CUTOFF" \
+                '.[] | select(((.metadata.container.tags // []) | length == 0) and (.created_at < $cutoff)) | .id' 2>/dev/null)
+              while IFS= read -r VID; do
+                [ -z "$VID" ] && continue
+                if gh api --method DELETE "/orgs/intarweb/packages/container/${PKG}/versions/${VID}" 2>/dev/null; then
+                  PKG_DELETED=$((PKG_DELETED + 1))
+                fi
+              done <<< "$IDS"
+              COUNT=$(echo "$VERSIONS" | jq 'length' 2>/dev/null)
+              [ "${COUNT:-0}" -lt 100 ] && break
+            done
+            [ "${PKG_DELETED:-0}" -gt 0 ] && echo "  ${PKG}: deleted ${PKG_DELETED} orphan untagged versions"
+            DELETED=$((DELETED + ${PKG_DELETED:-0}))
+          done
+          echo ""
+          echo "  total heal-G actions: ${DELETED:-0}"
