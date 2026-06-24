@@ -7,6 +7,10 @@ Prior:    (none — first run)
 
   - vllm
 
+## ❌ Forks with FAILED build-from-source (workflow present)
+
+  - bifrost
+
 ## Inventory (24 forks)
 
 | Fork | Class | sync | build | open PRs |
@@ -15,7 +19,7 @@ Prior:    (none — first run)
 | SGM-Helper | model-b | success | skipped | 3 |
 | a2abridge | other | none | none | 1 |
 | acme.sh | model-b | success | success | 0 |
-| bifrost | model-b | success | success | 0 |
+| bifrost | model-b | success | failure | 0 |
 | claude-code-router | model-b | success | success | 5 |
 | cloudflare-ddns | model-b | success | success | 0 |
 | connect | model-b | success | skipped | 0 |
