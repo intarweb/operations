@@ -297,7 +297,7 @@ jobs:
           SNAP="${{ steps.snap.outputs.snapshot }}"
           [ -z "$SNAP" ] && exit 0
 
-          TEMPLATES="plugins/oss-contributing/skills/ghcr-fork-mirror/templates"
+          TEMPLATES="templates"
           HEALED=0
           # NEEDS_SYNC: space-separated fork names that received a canonical
           # workflow push this sweep. After the loop completes, we
@@ -782,7 +782,7 @@ jobs:
               fi
             fi
 
-            TEMPLATES="plugins/oss-contributing/skills/ghcr-fork-mirror/templates"
+            TEMPLATES="templates"
             for TPL in sync-upstream.yml build-from-source.yml fork-publish.yml update-fork-info.yml fold-on-push.yml; do
               # Skip build-from-source on upstreams that already publish to DH
               if [ "$TPL" = "build-from-source.yml" ] && [ "$UPSTREAM_HAS_DH" = "true" ]; then
