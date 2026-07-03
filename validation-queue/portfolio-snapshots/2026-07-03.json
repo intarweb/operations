@@ -1,0 +1,498 @@
+[
+  {
+    "name": "RetroSaveManager",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:03:42Z",
+    "upstream": "joeblack2k/RetroSaveManager",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "SGM-Helper",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:00:28Z",
+    "upstream": "joeblack2k/SGM-Helper",
+    "sync_conclusion": "success",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 3,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "a2abridge",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:08:10Z",
+    "upstream": "vbcherepanov/a2abridge",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "acme.sh",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:19:46Z",
+    "upstream": "acmesh-official/acme.sh",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "addon-unifi-protect-presence",
+    "class": "other",
+    "pushed": "2026-06-27T18:19:59Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "bifrost",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:05:57Z",
+    "upstream": "maximhq/bifrost",
+    "sync_conclusion": "success",
+    "build_conclusion": "failure",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "claude-code-router",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:05:26Z",
+    "upstream": "musistudio/claude-code-router",
+    "sync_conclusion": "failure",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "cloudflare-ddns",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:19:48Z",
+    "upstream": "favonia/cloudflare-ddns",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "connect",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:10:56Z",
+    "upstream": "1Password/connect",
+    "sync_conclusion": "success",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "coredns-docker-discovery",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:12Z",
+    "upstream": "vxcontrol/coredns-docker-discovery",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "discordmcp",
+    "class": "other",
+    "pushed": "2026-06-26T10:34:00Z",
+    "upstream": "v-3/discordmcp",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-alpine",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:21:12Z",
+    "upstream": "alpinelinux/docker-alpine",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-autoheal",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:02Z",
+    "upstream": "willfarrell/docker-autoheal",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-neo4j",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:30Z",
+    "upstream": "neo4j/docker-neo4j",
+    "sync_conclusion": "success",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "filament-manager",
+    "class": "other",
+    "pushed": "2026-07-03T13:28:42Z",
+    "upstream": "cgradl/filament-manager",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 6,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "fork-ci",
+    "class": "other",
+    "pushed": "2026-07-03T05:04:03Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "glance",
+    "class": "other",
+    "pushed": "2026-07-03T05:30:12Z",
+    "upstream": "glanceapp/glance",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "gotenberg",
+    "class": "model-b",
+    "pushed": "2026-07-03T14:25:52Z",
+    "upstream": "gotenberg/gotenberg",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "hass-oidc-auth",
+    "class": "other",
+    "pushed": "2026-05-31T14:27:29Z",
+    "upstream": "christiaangoossens/hass-oidc-auth",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "hermes-agent",
+    "class": "model-b",
+    "pushed": "2026-07-03T13:01:23Z",
+    "upstream": "NousResearch/hermes-agent",
+    "sync_conclusion": "failure",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "homeassistant-addons",
+    "class": "other",
+    "pushed": "2026-07-03T13:34:53Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "lock_code_manager",
+    "class": "other",
+    "pushed": "2026-07-02T16:03:43Z",
+    "upstream": "raman325/lock_code_manager",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "mcp-neo4j",
+    "class": "model-b",
+    "pushed": "2026-07-02T08:05:29Z",
+    "upstream": "neo4j-contrib/mcp-neo4j",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "mcp-python-interpreter",
+    "class": "model-b",
+    "pushed": "2026-07-03T14:13:29Z",
+    "upstream": "yzfly/mcp-python-interpreter",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "nodejs-poolController",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:01:49Z",
+    "upstream": "tagyoureit/nodejs-poolController",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "operations",
+    "class": "other",
+    "pushed": "2026-07-02T16:06:18Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "supergateway",
+    "class": "model-b",
+    "pushed": "2026-07-03T15:45:50Z",
+    "upstream": "supercorp-ai/supergateway",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "tika-docker",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:59Z",
+    "upstream": "apache/tika-docker",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "uiprotect",
+    "class": "other",
+    "pushed": "2026-07-02T11:24:36Z",
+    "upstream": "uilibs/uiprotect",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "vllm",
+    "class": "model-b",
+    "pushed": "2026-07-03T14:28:29Z",
+    "upstream": "vllm-project/vllm",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "wud",
+    "class": "model-b",
+    "pushed": "2026-07-03T14:09:41Z",
+    "upstream": "getwud/wud",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  }
+]
