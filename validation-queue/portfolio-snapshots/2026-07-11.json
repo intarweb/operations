@@ -1,0 +1,546 @@
+[
+  {
+    "name": "RetroSaveManager",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:45:14Z",
+    "upstream": "joeblack2k/RetroSaveManager",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "SGM-Helper",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:17:02Z",
+    "upstream": "joeblack2k/SGM-Helper",
+    "sync_conclusion": "success",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 3,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "a2abridge",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:49:29Z",
+    "upstream": "vbcherepanov/a2abridge",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "acme.sh",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:19:46Z",
+    "upstream": "acmesh-official/acme.sh",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "addon-unifi-protect-presence",
+    "class": "other",
+    "pushed": "2026-06-27T18:19:59Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "bambu-filaman-sync",
+    "class": "other",
+    "pushed": "2026-07-06T01:37:16Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "bifrost",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:47:10Z",
+    "upstream": "maximhq/bifrost",
+    "sync_conclusion": "success",
+    "build_conclusion": "failure",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "claude-code-router",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:47:15Z",
+    "upstream": "musistudio/claude-code-router",
+    "sync_conclusion": "failure",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "cloudflare-ddns",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:19:48Z",
+    "upstream": "favonia/cloudflare-ddns",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "connect",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:17:32Z",
+    "upstream": "1Password/connect",
+    "sync_conclusion": "failure",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "coredns-docker-discovery",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:12Z",
+    "upstream": "vxcontrol/coredns-docker-discovery",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "deltachat-fabric",
+    "class": "other",
+    "pushed": "2026-07-07T17:51:37Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "discordmcp",
+    "class": "other",
+    "pushed": "2026-06-26T10:34:00Z",
+    "upstream": "v-3/discordmcp",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-alpine",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:21:12Z",
+    "upstream": "alpinelinux/docker-alpine",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-autoheal",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:02Z",
+    "upstream": "willfarrell/docker-autoheal",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "docker-neo4j",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:30Z",
+    "upstream": "neo4j/docker-neo4j",
+    "sync_conclusion": "success",
+    "build_conclusion": "skipped",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "excalidraw-full",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:52:03Z",
+    "upstream": "BetterAndBetterII/excalidraw-full",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "filament-manager",
+    "class": "model-b",
+    "pushed": "2026-07-03T16:04:07Z",
+    "upstream": "cgradl/filament-manager",
+    "sync_conclusion": "failure",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "fork-ci",
+    "class": "other",
+    "pushed": "2026-07-03T05:04:03Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "glance",
+    "class": "model-b",
+    "pushed": "2026-07-03T16:04:14Z",
+    "upstream": "glanceapp/glance",
+    "sync_conclusion": "",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "gotenberg",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:46:44Z",
+    "upstream": "gotenberg/gotenberg",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "hass-oidc-auth",
+    "class": "other",
+    "pushed": "2026-05-31T14:27:29Z",
+    "upstream": "christiaangoossens/hass-oidc-auth",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "hermes-agent",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:45:56Z",
+    "upstream": "NousResearch/hermes-agent",
+    "sync_conclusion": "failure",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "homeassistant-addons",
+    "class": "other",
+    "pushed": "2026-07-04T19:43:06Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "lock_code_manager",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:46:57Z",
+    "upstream": "raman325/lock_code_manager",
+    "sync_conclusion": "success",
+    "build_conclusion": "failure",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "mcp-neo4j",
+    "class": "model-b",
+    "pushed": "2026-07-02T08:05:29Z",
+    "upstream": "neo4j-contrib/mcp-neo4j",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 1,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "mcp-python-interpreter",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:25:58Z",
+    "upstream": "yzfly/mcp-python-interpreter",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "nodejs-poolController",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:19:34Z",
+    "upstream": "tagyoureit/nodejs-poolController",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "operations",
+    "class": "other",
+    "pushed": "2026-07-10T16:25:05Z",
+    "upstream": "unknown",
+    "sync_conclusion": "none",
+    "build_conclusion": "none",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": false,
+      "fork_publish": false,
+      "update_fork_info": false,
+      "build_from_source": false
+    },
+    "intarweb_dev_present": false
+  },
+  {
+    "name": "supergateway",
+    "class": "model-b",
+    "pushed": "2026-07-11T14:14:55Z",
+    "upstream": "supercorp-ai/supergateway",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "tika-docker",
+    "class": "model-b",
+    "pushed": "2026-06-27T15:20:59Z",
+    "upstream": "apache/tika-docker",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "uiprotect",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:46:50Z",
+    "upstream": "uilibs/uiprotect",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "vllm",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:47:51Z",
+    "upstream": "vllm-project/vllm",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 0,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  },
+  {
+    "name": "wud",
+    "class": "model-b",
+    "pushed": "2026-07-11T13:22:59Z",
+    "upstream": "getwud/wud",
+    "sync_conclusion": "success",
+    "build_conclusion": "success",
+    "open_intarweb_prs": 2,
+    "workflows": {
+      "sync_upstream": true,
+      "fork_publish": true,
+      "update_fork_info": true,
+      "build_from_source": true
+    },
+    "intarweb_dev_present": true
+  }
+]
