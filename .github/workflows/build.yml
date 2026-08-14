@@ -99,7 +99,11 @@ jobs:
             commit -m "ci: re-apply canonical build workflow overlay [skip ci]"
           # 4. force-push mirror main w/ GH_PAT. Pushing to a URL = anonymous
           #    remote → --force-with-lease can't map the tracking ref, so pass the
-          #    expected value explicitly (fresh fetch).
+          #    expected value explicitly (fresh fetch). checkout@v4's
+          #    persist-credentials sets an Authorization extraheader that would
+          #    override the URL's PAT with the GITHUB_TOKEN — drop it first.
+          git config --unset-all http.https://github.com/.extraheader || true
+          git config --unset-all credential.helper || true
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
           git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
