@@ -67,15 +67,6 @@ jobs:
           token: ${{ github.token }}
           fetch-depth: 0
 
-      - name: 🤖 Mint org sync-app token (workflows permission for mirror push)
-        id: app
-        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ vars.SYNC_APP_ID }}
-          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
-          owner: intarweb
-
       - name: 🔄 Sync fork main → upstream + re-apply build.yml overlay
         id: sync
         if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
@@ -100,19 +91,20 @@ jobs:
           mkdir -p .github/workflows
           cp /tmp/consumer-build.yml .github/workflows/build.yml
           git add .github/workflows/build.yml
+          # [skip ci] is REQUIRED: GITHUB_TOKEN (a GitHub App) can never modify
+          # .github/workflows (no `workflows` perm), so the overlay push MUST use
+          # the org GH_PAT (workflows scope) — and a PAT push re-triggers `on: push`,
+          # so the skip-ci marker is what stops forks from looping on themselves.
           git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
-            commit -m "ci: re-apply canonical build workflow overlay"
-          # 4. force-push mirror main w/ SYNC_APP token — GITHUB_TOKEN can NEVER
-          #    touch .github/workflows (GitHub App lacks `workflows` permission);
-          #    the app token is org-scoped, minted from inherited org secrets.
-          #    Pushing to a URL = anonymous remote → --force-with-lease can't map
-          #    the tracking ref, so pass the expected value explicitly (fresh fetch).
-          #    (app-token push does NOT re-trigger the workflow)
+            commit -m "ci: re-apply canonical build workflow overlay [skip ci]"
+          # 4. force-push mirror main w/ GH_PAT. Pushing to a URL = anonymous
+          #    remote → --force-with-lease can't map the tracking ref, so pass the
+          #    expected value explicitly (fresh fetch).
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
-          git push "https://x-access-token:${{ steps.app.outputs.token }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
+          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
-            echo "::warning::overlay push failed (workflows permission?); mirror main may drift until next run"
+            echo "::warning::overlay push failed; mirror main may drift until next run"
 
       - name: 🌿 Checkout build tree
         if: steps.cls.outputs.skip == 'false'
