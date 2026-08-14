@@ -1,0 +1,218 @@
+name: build
+
+# Central ephemeral image builder — imported AS-IS by every intarweb repo.
+#
+# ONE workflow, self-detecting: it asks GitHub whether THIS repo is a fork
+# (has an upstream parent) and behaves accordingly. No forks.json, no per-repo
+# config, no intarweb-dev / deploy branch. Consumers carry a thin workflow
+# (operations/consumer/build.yml — the canonical copy) that `uses:` this file
+# and nothing else. No repo secrets required — the caller's GITHUB_TOKEN
+# (passed via `secrets: inherit`) handles everything.
+#
+# Hosted in intarweb/operations on purpose: public repo → reusable workflows
+# resolve from every intarweb repo, and public repos get unlimited Actions
+# minutes.
+#
+#   FORK        (repo has a parent): hard-sync `main` → pure mirror of the
+#               upstream default branch, RE-APPLY the canonical build.yml
+#               overlay (the one deterministic commit main carries — without it
+#               the schedule would die after one sync), fold every open
+#               intarweb→upstream PR onto the tree (cherry-pick, fail-closed on
+#               conflict), build → :latest + :sha-<fp>. Rebuilds on our PR
+#               updates (fp changes) and on the clock.
+#
+#   GREENFIELD  (our own project): build the pushed default branch → :latest + :sha-<git>.
+#
+# Fingerprint = sha256(upstream/main sha + sorted open-PR shas). If
+# ghcr.io/intarweb/<name>:sha-<fp> already exists, the build is a no-op.
+# Optional repo Variables (with sane defaults): DOCKERFILE, CONTEXT, PLATFORMS.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write      # fork: re-apply build.yml overlay + force-push mirror main
+  packages: write      # GHCR push
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧭 Classify fork vs greenfield
+        id: cls
+        run: |
+          set -euo pipefail
+          PARENT="$(gh api "repos/${{ github.repository }}" --jq '.parent.full_name // ""' 2>/dev/null || true)"
+          IS_FORK="false"
+          [ -n "$PARENT" ] && IS_FORK="true"
+          DEFAULT="${{ github.event.repository.default_branch }}"
+          SKIP="false"
+          # greenfield: only build on pushes to the default branch (and dispatch/schedule)
+          if [ "$IS_FORK" = "false" ] && [ "${{ github.event_name }}" = "push" ] \
+             && [ "${{ github.ref }}" != "refs/heads/$DEFAULT" ]; then
+            SKIP="true"
+          fi
+          echo "fork=$IS_FORK"        >> "$GITHUB_OUTPUT"
+          echo "upstream=$PARENT"     >> "$GITHUB_OUTPUT"
+          echo "default=$DEFAULT"     >> "$GITHUB_OUTPUT"
+          echo "skip=$SKIP"           >> "$GITHUB_OUTPUT"
+          echo "  fork=$IS_FORK  upstream=$PARENT  default=$DEFAULT  skip=$SKIP"
+
+      - name: 📥 Checkout repo (full history)
+        if: steps.cls.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          fetch-depth: 0
+
+      - name: 🔄 Sync fork main → upstream + re-apply build.yml overlay
+        id: sync
+        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          UPSTREAM_URL="https://github.com/${{ steps.cls.outputs.upstream }}.git"
+          DEFAULT="${{ steps.cls.outputs.default }}"
+          # 1. put us on the fork's default branch (detached on schedule/dispatch)
+          git checkout -B "$DEFAULT" "origin/$DEFAULT"
+          # 2. hard-reset to upstream default → pure mirror
+          git fetch --quiet "$UPSTREAM_URL" "$DEFAULT"
+          UPSTREAM_SHA="$(git rev-parse FETCH_HEAD)"
+          git reset --hard "$UPSTREAM_SHA"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "  upstream ${{ steps.cls.outputs.upstream }}@$UPSTREAM_SHA"
+          # 3. re-apply the canonical consumer overlay (single source: operations/consumer/build.yml)
+          curl -fsSL -o /tmp/consumer-build.yml \
+            "https://raw.githubusercontent.com/intarweb/operations/main/consumer/build.yml" \
+            || { echo "::error::could not fetch canonical consumer from operations"; exit 1; }
+          mkdir -p .github/workflows
+          cp /tmp/consumer-build.yml .github/workflows/build.yml
+          git add .github/workflows/build.yml
+          git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
+            commit -m "ci: re-apply canonical build workflow overlay"
+          # 4. force-push mirror main (workflow push w/ GITHUB_TOKEN does NOT re-trigger)
+          git push origin "$DEFAULT" --force-with-lease || \
+            echo "::warning::overlay push failed (main protected?); mirror main may drift until next run"
+
+      - name: 🌿 Checkout build tree
+        if: steps.cls.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.cls.outputs.fork }}" = "true" ]; then
+            git checkout -B build-tree "${{ steps.cls.outputs.default }}"
+          else
+            git checkout -B build-tree "${{ github.sha }}"
+          fi
+          echo "  building $(git rev-parse HEAD)"
+
+      - name: "🔢 Fingerprint (fork: upstream + sorted PR shas | greenfield: git sha)"
+        id: fp
+        if: steps.cls.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.cls.outputs.fork }}" = "true" ]; then
+            MAIN_SHA="${{ steps.sync.outputs.upstream_sha }}"
+            mapfile -t BRANCHES < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open \
+              --json headRefName,headRepositoryOwner \
+              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')
+            PR_SHAS=""
+            for b in "${BRANCHES[@]:-}"; do
+              [ -z "$b" ] && continue
+              git fetch --quiet origin "$b:pr/$b" || continue
+              PR_SHAS="$PR_SHAS $(git rev-parse "pr/$b")"
+              echo "  PR branch $b -> $(git rev-parse "pr/$b")"
+            done
+            SORTED="$(printf '%s\n' $PR_SHAS | sort | tr '\n' ' ')"
+            FP="$(printf '%s %s' "$MAIN_SHA" "$SORTED" | sha256sum | cut -c1-12)"
+            echo "branches=${BRANCHES[*]:-}" >> "$GITHUB_OUTPUT"
+          else
+            FP="$(git rev-parse HEAD | cut -c1-12)"
+            echo "branches=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "fp=$FP" >> "$GITHUB_OUTPUT"
+          { echo "### ${{ github.event.repository.name }}"; \
+            echo "- fork: \`${{ steps.cls.outputs.fork }}\` upstream: \`${{ steps.cls.outputs.upstream }}\`"; \
+            echo "- head: \`$(git rev-parse HEAD)\`"; \
+            echo "- open PRs: \`${BRANCHES[*]:-<none>}\`"; \
+            echo "- fp: \`sha-$FP\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: ⏭️ No-op check (fingerprint already published?)
+        id: noop
+        if: steps.cls.outputs.skip == 'false'
+        run: |
+          FP="sha-${{ steps.fp.outputs.fp }}"
+          T="$(curl -sf "https://ghcr.io/token?scope=repository:intarweb/${{ github.event.repository.name }}:pull" \
+            | python3 -c 'import json,sys;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
+          CODE=000
+          [ -n "$T" ] && CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/intarweb/${{ github.event.repository.name }}/manifests/$FP")"
+          if [ "$CODE" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "  no-op ($FP present)"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "  building ($FP http $CODE)"
+          fi
+
+      - name: 🍒 Assemble (cherry-pick open PRs onto build tree)
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name intarweb-ci
+          git config user.email ci@intarweb.invalid
+          for b in ${{ steps.fp.outputs.branches }}; do
+            echo "  cherry-pick HEAD..pr/$b"
+            git cherry-pick "HEAD..pr/$b" || {
+              git cherry-pick --abort || true
+              echo "::error::cherry-pick conflict on $b"
+              exit 1
+            }
+          done
+
+      - name: 🔍 Locate Dockerfile + context
+        id: df
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          DF="${DOCKERFILE:-}"
+          CTX="."
+          if [ -z "$DF" ]; then
+            if [ -f Dockerfile ]; then DF="Dockerfile"
+            elif [ -f docker/Dockerfile ]; then DF="docker/Dockerfile"; CTX="docker"
+            else
+              DF="$(find . -maxdepth 2 \( -name Dockerfile -o -name '*.dockerfile' \) | head -1 | sed 's#^\./##')"
+              CTX="$(dirname "$DF")"
+            fi
+          fi
+          echo "df=$DF" >> "$GITHUB_OUTPUT"
+          echo "ctx=$CTX" >> "$GITHUB_OUTPUT"
+          echo "  dockerfile=$DF context=$CTX"
+
+      - name: 🐳 Set up Buildx
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🔑 Login to GHCR
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📦 Build + push :latest + :sha-<fp>
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ steps.df.outputs.ctx }}
+          file: ${{ steps.df.outputs.df }}
+          platforms: ${{ vars.PLATFORMS || 'linux/amd64,linux/arm64' }}
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/intarweb/${{ github.event.repository.name }}:latest
+            ghcr.io/intarweb/${{ github.event.repository.name }}:sha-${{ steps.fp.outputs.fp }}

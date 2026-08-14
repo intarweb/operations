@@ -14,6 +14,7 @@ billing block — relocated here 2026-06-24.
 | `portfolio-audit.yml` | daily 14:00 UTC + dispatch | Snapshot every `intarweb/*` fork (workflows present, `intarweb-dev` branch, sync-upstream + build-from-source run states, open intarweb→upstream PRs); diff vs prior snapshot; commit a drift digest. |
 | `portfolio-auto-heal.yml` | daily 14:15 UTC + on audit success + dispatch | Auto-fix detected drift (re-template missing workflows, kick stalled sync-upstream, etc.). |
 | `portfolio-build-health.yml` | dispatch | Build-health spot-check across the pool. |
+| `build.yml` | _reusable_ | Shared ephemeral image builder — imported AS-IS by every intarweb repo. Self-detecting fork vs greenfield; syncs mirror main + folds open PRs for forks, builds `:latest` + `:sha-<fp>`. Callers: each repo's thin `consumer/build.yml`. |
 
 Output (drift digests + JSON snapshots) is committed to `validation-queue/` in this repo.
 
