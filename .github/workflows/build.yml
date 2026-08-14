@@ -67,6 +67,15 @@ jobs:
           token: ${{ github.token }}
           fetch-depth: 0
 
+      - name: 🤖 Mint org sync-app token (workflows permission for mirror push)
+        id: app
+        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+
       - name: 🔄 Sync fork main → upstream + re-apply build.yml overlay
         id: sync
         if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
@@ -93,9 +102,13 @@ jobs:
           git add .github/workflows/build.yml
           git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
             commit -m "ci: re-apply canonical build workflow overlay"
-          # 4. force-push mirror main (workflow push w/ GITHUB_TOKEN does NOT re-trigger)
-          git push origin "$DEFAULT" --force-with-lease || \
-            echo "::warning::overlay push failed (main protected?); mirror main may drift until next run"
+          # 4. force-push mirror main w/ SYNC_APP token — GITHUB_TOKEN can NEVER
+          #    touch .github/workflows (GitHub App lacks `workflows` permission);
+          #    the app token is org-scoped, minted from inherited org secrets.
+          #    (app-token push does NOT re-trigger the workflow)
+          git push "https://x-access-token:${{ steps.app.outputs.token }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
+            "$DEFAULT" --force-with-lease || \
+            echo "::warning::overlay push failed (workflows permission?); mirror main may drift until next run"
 
       - name: 🌿 Checkout build tree
         if: steps.cls.outputs.skip == 'false'
