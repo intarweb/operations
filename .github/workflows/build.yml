@@ -130,7 +130,7 @@ jobs:
           git config --unset-all credential.helper || true
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
-          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ steps.cls.outputs.image }}.git" \
+          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed; mirror main may drift until next run"
 
