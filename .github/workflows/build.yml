@@ -105,9 +105,13 @@ jobs:
           # 4. force-push mirror main w/ SYNC_APP token — GITHUB_TOKEN can NEVER
           #    touch .github/workflows (GitHub App lacks `workflows` permission);
           #    the app token is org-scoped, minted from inherited org secrets.
+          #    Pushing to a URL = anonymous remote → --force-with-lease can't map
+          #    the tracking ref, so pass the expected value explicitly (fresh fetch).
           #    (app-token push does NOT re-trigger the workflow)
+          git fetch --quiet origin
+          EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
           git push "https://x-access-token:${{ steps.app.outputs.token }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
-            "$DEFAULT" --force-with-lease || \
+            "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed (workflows permission?); mirror main may drift until next run"
 
       - name: 🌿 Checkout build tree
