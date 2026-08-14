@@ -183,11 +183,14 @@ jobs:
           git config user.email ci@intarweb.invalid
           for b in ${{ steps.fp.outputs.branches }}; do
             echo "  cherry-pick HEAD..pr/$b"
-            git cherry-pick "HEAD..pr/$b" || {
+            if ! git cherry-pick "HEAD..pr/$b" 2>/tmp/cp.err; then
+              # fail-OPEN: one stale conflicting PR must not brick :latest for
+              # the whole fork — skip it (its change isn't in the image yet)
+              # and keep building the rest.
               git cherry-pick --abort || true
-              echo "::error::cherry-pick conflict on $b"
-              exit 1
-            }
+              echo "::warning::PR $b conflicts with upstream — skipped (not in :latest); rebase the PR to fold it in"
+              cat /tmp/cp.err >&2 || true
+            fi
           done
 
       - name: 🔍 Locate Dockerfile + context
