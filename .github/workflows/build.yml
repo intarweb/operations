@@ -191,10 +191,16 @@ jobs:
       - name: 🔍 Locate Dockerfile + context
         id: df
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        env:
+          DOCKERFILE: ${{ vars.DOCKERFILE }}
+          CONTEXT: ${{ vars.CONTEXT }}
         run: |
           set -euo pipefail
-          DF="${DOCKERFILE:-}"
+          DF=""
           CTX="."
+          # explicit repo vars win only if the file actually exists (org default
+          # DOCKERFILE=Dockerfile must not break rootless repos)
+          [ -n "${DOCKERFILE:-}" ] && [ -f "$DOCKERFILE" ] && DF="$DOCKERFILE"
           if [ -z "$DF" ]; then
             if [ -f Dockerfile ]; then DF="Dockerfile"
             elif [ -f docker/Dockerfile ]; then DF="docker/Dockerfile"; CTX="docker"
@@ -202,6 +208,8 @@ jobs:
               DF="$(find . -maxdepth 2 \( -name Dockerfile -o -name '*.dockerfile' \) | head -1 | sed 's#^\./##')"
               CTX="$(dirname "$DF")"
             fi
+          else
+            CTX="${CONTEXT:-.}"
           fi
           echo "df=$DF" >> "$GITHUB_OUTPUT"
           echo "ctx=$CTX" >> "$GITHUB_OUTPUT"
