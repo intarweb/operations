@@ -42,6 +42,7 @@ jobs:
         id: cls
         env:
           GH_TOKEN: ${{ github.token }}
+          IMAGE_NAME: ${{ vars.IMAGE_NAME }}
         run: |
           set -euo pipefail
           PARENT="$(gh api "repos/${{ github.repository }}" --jq '.parent.full_name // ""' 2>/dev/null || true)"
@@ -62,7 +63,9 @@ jobs:
              && [ "${{ github.ref }}" != "refs/heads/$DEFAULT" ]; then
             SKIP="true"
           fi
-          IMAGE="$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')"
+          # Image name: explicit IMAGE_NAME repo Variable wins (mcp-neo4j →
+          # neo4j-memory, vllm → vllm-openai); else the lowercased repo name.
+          IMAGE="$(echo "${IMAGE_NAME:-${{ github.event.repository.name }}}" | tr '[:upper:]' '[:lower:]')"
           echo "fork=$IS_FORK"        >> "$GITHUB_OUTPUT"
           echo "upstream=$PARENT"     >> "$GITHUB_OUTPUT"
           echo "default=$DEFAULT"     >> "$GITHUB_OUTPUT"
