@@ -110,7 +110,11 @@ jobs:
             || { echo "::error::could not fetch canonical consumer from operations"; exit 1; }
           mkdir -p .github/workflows
           cp /tmp/consumer-build.yml .github/workflows/build.yml
-          git add .github/workflows/build.yml
+          # prune any OTHER workflow the mirror carried in from upstream (and our
+          # own retired legacy ones) so upstream's CI never fires on the fork →
+          # build-failure email noise. build.yml is the sole workflow by law.
+          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'build.yml' -delete
+          git add -A .github/workflows
           # [skip ci] is REQUIRED: GITHUB_TOKEN (a GitHub App) can never modify
           # .github/workflows (no `workflows` perm), so the overlay push MUST use
           # the org GH_PAT (workflows scope) — and a PAT push re-triggers `on: push`,
