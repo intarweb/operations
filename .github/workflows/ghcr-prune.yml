@@ -1,0 +1,64 @@
+name: 🗑️ GHCR orphan prune
+
+# Weekly GHCR cleanup for the intarweb registry. Every build push creates a new
+# digest and retags :latest / :sha-<fp>, orphaning the previous digest — without
+# cleanup the registry bloats (cloudflare-ddns hit 477 orphans before this
+# existed as the auto-heal's Heal G). Policy: delete untagged versions older
+# than 14 days. Tagged versions are never touched. Runs on the org App token —
+# org-level package version listing/deletion needs it, not a repo GITHUB_TOKEN.
+
+on:
+  schedule:
+    - cron: '30 2 * * 0'    # weekly Sunday 02:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 🤖 Mint org-bot app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+
+      - name: 🗑️ Delete untagged versions older than 14 days
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          CUTOFF=$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+            || python3 -c "import datetime;print((datetime.datetime.utcnow()-datetime.timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+          echo "  cutoff: $CUTOFF (untagged versions older than this → delete)"
+          DELETED=0
+          # Org-level package *listing* 400s on App tokens, so iterate org repos
+          # and derive the package name (IMAGE_NAME repo Variable wins, else the
+          # lowercased repo name — matches the shared build workflow's naming).
+          for REPO in $(gh repo list intarweb --limit 100 --json name --jq '.[].name'); do
+            IMG=$(gh api "repos/intarweb/${REPO}/actions/variables/IMAGE_NAME" --jq '.value' 2>/dev/null || echo "")
+            PKG=$(echo "${IMG:-$REPO}" | tr '[:upper:]' '[:lower:]')
+            VERSIONS=$(gh api "orgs/intarweb/packages/container/${PKG}/versions?per_page=100" 2>/dev/null || true)
+            [ -z "$VERSIONS" ] || [ "$VERSIONS" = "[]" ] && continue
+            IDS=$(echo "$VERSIONS" | jq -r --arg c "$CUTOFF" \
+              '.[] | select(((.metadata.container.tags // [])|length) == 0 and .created_at < $c) | .id')
+            for VID in $IDS; do
+              [ -z "$VID" ] && continue
+              if gh api --method DELETE "orgs/intarweb/packages/container/${PKG}/versions/${VID}" >/dev/null 2>&1; then
+                DELETED=$((DELETED + 1))
+                echo "    deleted ${PKG} version ${VID}"
+              fi
+            done
+          done
+          echo ""
+          echo "  total deleted: ${DELETED}"
+          {
+            echo "### GHCR orphan prune"
+            echo "- untagged versions >14d deleted: **${DELETED}**"
+          } >> "$GITHUB_STEP_SUMMARY"
