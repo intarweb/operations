@@ -54,11 +54,13 @@ jobs:
              && [ "${{ github.ref }}" != "refs/heads/$DEFAULT" ]; then
             SKIP="true"
           fi
+          IMAGE="$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')"
           echo "fork=$IS_FORK"        >> "$GITHUB_OUTPUT"
           echo "upstream=$PARENT"     >> "$GITHUB_OUTPUT"
           echo "default=$DEFAULT"     >> "$GITHUB_OUTPUT"
           echo "skip=$SKIP"           >> "$GITHUB_OUTPUT"
-          echo "  fork=$IS_FORK  upstream=$PARENT  default=$DEFAULT  skip=$SKIP"
+          echo "image=$IMAGE"         >> "$GITHUB_OUTPUT"
+          echo "  fork=$IS_FORK  upstream=$PARENT  default=$DEFAULT  skip=$SKIP  image=$IMAGE"
 
       - name: 📥 Checkout repo (full history)
         if: steps.cls.outputs.skip == 'false'
@@ -106,7 +108,7 @@ jobs:
           git config --unset-all credential.helper || true
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
-          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
+          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ steps.cls.outputs.image }}.git" \
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed; mirror main may drift until next run"
 
@@ -148,7 +150,7 @@ jobs:
             echo "branches=" >> "$GITHUB_OUTPUT"
           fi
           echo "fp=$FP" >> "$GITHUB_OUTPUT"
-          { echo "### ${{ github.event.repository.name }}"; \
+          { echo "### ${{ steps.cls.outputs.image }}"; \
             echo "- fork: \`${{ steps.cls.outputs.fork }}\` upstream: \`${{ steps.cls.outputs.upstream }}\`"; \
             echo "- head: \`$(git rev-parse HEAD)\`"; \
             echo "- open PRs: \`${BRANCHES[*]:-<none>}\`"; \
@@ -159,12 +161,12 @@ jobs:
         if: steps.cls.outputs.skip == 'false'
         run: |
           FP="sha-${{ steps.fp.outputs.fp }}"
-          T="$(curl -sf "https://ghcr.io/token?scope=repository:intarweb/${{ github.event.repository.name }}:pull" \
+          T="$(curl -sf "https://ghcr.io/token?scope=repository:intarweb/${{ steps.cls.outputs.image }}:pull" \
             | python3 -c 'import json,sys;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
           CODE=000
           [ -n "$T" ] && CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-            "https://ghcr.io/v2/intarweb/${{ github.event.repository.name }}/manifests/$FP")"
+            "https://ghcr.io/v2/intarweb/${{ steps.cls.outputs.image }}/manifests/$FP")"
           if [ "$CODE" = "200" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "  no-op ($FP present)"
@@ -237,5 +239,5 @@ jobs:
           push: true
           provenance: false
           tags: |
-            ghcr.io/intarweb/${{ github.event.repository.name }}:latest
-            ghcr.io/intarweb/${{ github.event.repository.name }}:sha-${{ steps.fp.outputs.fp }}
+            ghcr.io/intarweb/${{ steps.cls.outputs.image }}:latest
+            ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}
