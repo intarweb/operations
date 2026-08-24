@@ -82,10 +82,10 @@ jobs:
         with:
           token: ${{ github.token }}
           fetch-depth: 0
-          # excalidraw-full's build context needs its `excalidraw/` submodule
-          # populated (ERR_PNPM_NO_PKG_MANIFEST otherwise). checkout@v4 rewrites
-          # the SSH submodule URL to token-backed HTTPS; no-op for plain repos.
-          submodules: recursive
+          # Submodules are populated BEST-EFFORT below (build-tree step), not here:
+          # some forks (keeper.sh) carry gitlinks to private keeperdotsh repos that
+          # would abort checkout@v4's recursive clone and fail the whole build.
+          submodules: false
 
       - name: 🔄 Sync fork main → upstream + re-apply build.yml overlay
         id: sync
@@ -147,7 +147,11 @@ jobs:
           fi
           # submodule contents don't follow superproject checkout -B; top them up
           # (URLs already token-rewritten to HTTPS by checkout@v4; no-op w/o .gitmodules)
-          git submodule update --init --recursive
+          # best-effort submodule top-up: public submodules (excalidraw-full's
+          # excalidraw/) populate; private/unreachable ones (keeperdotsh/*) are
+          # skipped rather than failing the build.
+          git submodule update --init --recursive 2>/dev/null || \
+            { echo "::warning::some submodules unavailable (private?) — continuing"; true; }
           echo "  building $(git rev-parse HEAD)"
 
       - name: "🔢 Fingerprint (fork: upstream + sorted PR shas | greenfield: git sha)"
