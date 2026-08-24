@@ -153,6 +153,40 @@ jobs:
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed; mirror main may drift until next run"
 
+      - name: 🌱 Seed build.yml onto intarweb→upstream PR branches
+        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A PR branch cut from UPSTREAM main carries upstream's own workflows (or
+          # none), NOT our canonical build.yml — so pushes to that branch fire
+          # upstream CI or nothing, never our build. GitHub uses the branch's own
+          # workflow file, not main's. Seed the canonical build.yml onto every open
+          # intarweb→upstream PR branch that lacks it, so the NEXT push to the branch
+          # fires our build (push trigger = the real instant event).
+          # Operates in a throwaway clone so it never disturbs this runner's checkout.
+          SEED_DIR="$(mktemp -d)"
+          git clone -q --no-checkout "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" "$SEED_DIR"
+          cd "$SEED_DIR"
+          while read -r b; do
+            [ -z "$b" ] && continue
+            git fetch -q origin "$b" 2>/dev/null || continue
+            if git ls-tree "origin/$b" .github/workflows/build.yml >/dev/null 2>&1; then
+              echo "  $b already has build.yml — skip"
+              continue
+            fi
+            echo "  seeding build.yml onto $b"
+            git checkout -q -B seed "origin/$b"
+            mkdir -p .github/workflows
+            cp /tmp/consumer-build.yml .github/workflows/build.yml
+            git add .github/workflows/build.yml
+            git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid               commit -m "ci: seed canonical build.yml onto PR branch [skip ci]" >/dev/null 2>&1 || true
+            git push -q "origin" "HEAD:$b" 2>/dev/null ||               echo "::warning::could not push seed to $b"
+          done < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open             --json headRefName,headRepositoryOwner             --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')
+          rm -rf "$SEED_DIR"
+          echo "  seed complete"
+
       - name: 🌿 Checkout build tree
         if: steps.cls.outputs.skip == 'false'
         run: |
