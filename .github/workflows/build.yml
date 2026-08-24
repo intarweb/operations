@@ -107,9 +107,16 @@ jobs:
           echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
           echo "  upstream ${{ steps.cls.outputs.upstream }}@$UPSTREAM_SHA"
           # 3. re-apply the canonical consumer overlay (single source: operations/consumer/build.yml)
-          curl -fsSL -o /tmp/consumer-build.yml \
-            "https://raw.githubusercontent.com/intarweb/operations/main/consumer/build.yml" \
-            || { echo "::error::could not fetch canonical consumer from operations"; exit 1; }
+          # Best-effort: transient network resets must NOT fail the whole run
+          # (each failure = a build-failure email fleet-wide). Retry 3x; fall back
+          # to the overlay copy already in the tree if fetch keeps failing — the
+          # canonical consumer only changes with operations, and the next schedule
+          # tick retries.
+          if ! curl -fsSL --retry 3 --retry-delay 2 -o /tmp/consumer-build.yml \
+            "https://raw.githubusercontent.com/intarweb/operations/main/consumer/build.yml"; then
+            echo "::warning::could not fetch canonical consumer (network); reusing in-tree overlay"
+            cp .github/workflows/build.yml /tmp/consumer-build.yml 2>/dev/null || true
+          fi
           mkdir -p .github/workflows
           cp /tmp/consumer-build.yml .github/workflows/build.yml
           # prune any OTHER workflow the mirror carried in from upstream (and our
@@ -184,7 +191,9 @@ jobs:
             git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid               commit -m "ci: seed canonical build.yml onto PR branch [skip ci]" >/dev/null 2>&1 || true
             git push -q "origin" "HEAD:$b" 2>/dev/null ||               echo "::warning::could not push seed to $b"
           done < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open             --json headRefName,headRepositoryOwner             --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')
-          rm -rf "$SEED_DIR"
+          # Tolerate git's tmp-file race ("Directory not empty") — this is cleanup,
+          # not a build failure.
+          rm -rf "$SEED_DIR" 2>/dev/null || true
           echo "  seed complete"
 
       - name: 🌿 Checkout build tree
