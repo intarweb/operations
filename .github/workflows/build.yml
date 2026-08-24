@@ -58,8 +58,10 @@ jobs:
             UP_DEFAULT="$(gh api "repos/$PARENT" --jq '.default_branch' 2>/dev/null || echo "$DEFAULT")"
           fi
           SKIP="false"
-          # greenfield: only build on pushes to the default branch (and dispatch/schedule)
-          if [ "$IS_FORK" = "false" ] && [ "${{ github.event_name }}" = "push" ] \
+          # greenfield: only build on pushes to the default branch (and dispatch/schedule).
+          # PR-triggered runs on a greenfield non-default PR branch are a no-op.
+          if [ "$IS_FORK" = "false" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ] \
+             && [ "${{ github.event_name }}" != "schedule" ] \
              && [ "${{ github.ref }}" != "refs/heads/$DEFAULT" ]; then
             SKIP="true"
           fi
