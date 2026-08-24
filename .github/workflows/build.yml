@@ -123,6 +123,23 @@ jobs:
           # so the skip-ci marker is what stops forks from looping on themselves.
           git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
             commit -m "ci: re-apply canonical build workflow overlay [skip ci]"
+          # 3b. GitHub caches a workflow's registered `on:` triggers and only
+          # re-reads them when the file is deleted + re-added (a content edit or
+          # overlay push is NOT a re-registration). Force it: delete then re-add
+          # the file via the API so every sync re-registers the canonical
+          # triggers (push, pull_request, */15 schedule) on the fork.
+          WF_PATH=".github/workflows/build.yml"
+          WF_SHA="$(gh api "repos/${{ github.repository }}/contents/$WF_PATH" --jq '.sha' 2>/dev/null || true)"
+          if [ -n "$WF_SHA" ] && [ "$WF_SHA" != "null" ]; then
+            gh api -X DELETE "repos/${{ github.repository }}/contents/$WF_PATH" \
+              -f message="ci: force re-register build workflow (delete phase) [skip ci]" \
+              -f sha="$WF_SHA" >/dev/null 2>&1 || \
+              echo "::warning::delete phase failed (will re-add anyway)"
+          fi
+          gh api -X PUT "repos/${{ github.repository }}/contents/$WF_PATH" \
+            -f message="ci: re-register build workflow with canonical triggers (re-add phase) [skip ci]" \
+            -f content="$(base64 -w0 /tmp/consumer-build.yml)" >/dev/null 2>&1 || \
+            echo "::warning::re-add phase failed — triggers may be stale until next sync"
           # 4. force-push mirror main w/ GH_PAT. Pushing to a URL = anonymous
           #    remote → --force-with-lease can't map the tracking ref, so pass the
           #    expected value explicitly (fresh fetch). checkout@v4's
