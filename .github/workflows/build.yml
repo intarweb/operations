@@ -283,13 +283,26 @@ jobs:
           git config user.email ci@intarweb.invalid
           for b in ${{ steps.fp.outputs.branches }}; do
             echo "  cherry-pick HEAD..pr/$b"
-            if ! git cherry-pick "HEAD..pr/$b" 2>/tmp/cp.err; then
-              # fail-OPEN: one stale conflicting PR must not brick :latest for
-              # the whole fork — skip it (its change isn't in the image yet)
-              # and keep building the rest.
-              git cherry-pick --abort || true
-              echo "::warning::PR $b conflicts with upstream — skipped (not in :latest); rebase the PR to fold it in"
-              cat /tmp/cp.err >&2 || true
+            if ! git cherry-pick -X theirs "HEAD..pr/$b" 2>/tmp/cp.err; then
+              # Retry WITHOUT the overlay file (build.yml) in the way: PR branches
+              # are cut from upstream and carry upstream's own workflows, so the
+              # canonical build.yml we seeded is an add/add conflict. Resolve it
+              # in favor of OUR canonical file and retry the pick so the PR's real
+              # changes (Dockerfile, source) still land.
+              if git checkout --theirs -- .github/workflows/build.yml 2>/dev/null; then
+                git add .github/workflows/build.yml
+                if GIT_EDITOR=true git cherry-pick --continue 2>/tmp/cp2.err; then
+                  echo "  resolved build.yml conflict for $b; rest applied"
+                else
+                  git cherry-pick --abort || true
+                  echo "::warning::PR $b conflicts beyond build.yml — skipped; rebase it to fold in"
+                  cat /tmp/cp2.err >&2 || true
+                fi
+              else
+                git cherry-pick --abort || true
+                echo "::warning::PR $b conflicts with upstream — skipped (not in :latest); rebase the PR to fold it in"
+                cat /tmp/cp.err >&2 || true
+              fi
             fi
           done
 
