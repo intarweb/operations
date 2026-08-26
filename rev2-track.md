@@ -29,8 +29,19 @@
   - F8: mint a per-repo, per-run App token (`actions/create-github-app-token`, `intarweb-sync-bot`) for the sync step's overlay push + trigger re-registration, replacing the org-wide `secrets.GH_PAT` (invariant I4). `permission-contents/workflows: write` only narrow what the App already holds (W0-gated Contents+Workflows RW).
   - Fix during verify: push mirror main via HTTP `Authorization` extraheader (`git -c http.extraheader`, same mechanism GitHub Actions uses), NOT URL userinfo — git doesn't use an App token in the userinfo and dropped to a headless password prompt ("could not read Password"). Verified: overlay push `+ 4885e487...9448ae91 master -> master (forced update)` with the App token.
   - §9 gate: App-token sync green on acme.sh; PR #355 head branch carries **zero** `ci:` intarweb-ci commits (F1 seed gone).
+- [x] **W6 — F9 onboard/verify metamcp** (no code change — verification)
+  - Only workflow on the fork is the canonical `build.yml` (legacy `docker-publish.yml` already removed during onboarding).
+  - No `IMAGE_NAME` var → image defaults to `metamcp` (confirmed correct with owner).
+  - `ghcr.io/intarweb/metamcp:latest` published (tags `sha-b373d91fa60a,latest`), F7 labels present (`source/revision/version`). Builds green (recent `32955217909` success).
 
 ## Log
+
+### W6 (2026-08-26)
+- F9 onboard/verify metamcp: no code change. Confirmed the fork carries only the
+  canonical `build.yml` (legacy `docker-publish.yml` already gone), no `IMAGE_NAME`
+  var (defaults to `metamcp`), and `ghcr.io/intarweb/metamcp:latest` is published
+  with the F7 labels (`sha-b373d91fa60a`). `secrets.GH_PAT` deletion remains
+  owner-gated per the brief.
 
 ### W5 (2026-08-26)
 - F1+F8 landed (`3f5ddd6` PR #8 + `c6cf22e` fix): the 🌱 seed step is deleted; the sync
