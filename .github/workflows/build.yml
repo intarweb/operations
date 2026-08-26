@@ -87,12 +87,31 @@ jobs:
           # would abort checkout@v4's recursive clone and fail the whole build.
           submodules: false
 
+      # F8 — the sync step needs a token with contents+workflows scope (writing
+      # .github/workflows + force-pushing mirror main), which GITHUB_TOKEN
+      # (packages/contents only, no workflows perm) cannot do. The org-wide GH_PAT
+      # is the last long-lived org-wide credential in the fleet (invariant I4);
+      # replace it with a per-repo, per-run App token from the intarweb-sync-bot
+      # App (W0-gated to hold Contents RW + Workflows RW org-wide). permission-*
+      # inputs only NARROW what the App already holds — they cannot expand it.
+      - name: 🪙 Mint intarweb-sync-bot App token (F8)
+        id: tok
+        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: intarweb
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-workflows: write
+
       - name: 🔄 Sync fork main → upstream + re-apply build.yml overlay
         id: sync
         if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          GH_PAT: ${{ secrets.GH_PAT }}
+          TOK: ${{ steps.tok.outputs.token }}
         run: |
           set -euo pipefail
           UPSTREAM_URL="https://github.com/${{ steps.cls.outputs.upstream }}.git"
@@ -125,9 +144,9 @@ jobs:
           # build-failure email noise. build.yml is the sole workflow by law.
           find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'build.yml' -delete
           git add -A .github/workflows
-          # [skip ci] is REQUIRED: GITHUB_TOKEN (a GitHub App) can never modify
-          # .github/workflows (no `workflows` perm), so the overlay push MUST use
-          # the org GH_PAT (workflows scope) — and a PAT push re-triggers `on: push`,
+          # [skip ci] is REQUIRED: the App token (a GitHub App) can never modify
+          # .github/workflows (no `workflows` perm on GITHUB_TOKEN; the minted App
+          # token does have it, but App-token pushes still re-trigger `on: push`),
           # so the skip-ci marker is what stops forks from looping on themselves.
           git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
             commit -m "ci: re-apply canonical build workflow overlay [skip ci]"
@@ -136,14 +155,13 @@ jobs:
           # overlay push is NOT a re-registration). Force it: delete then re-add
           # the file via the API so every sync re-registers the canonical
           # triggers (push, pull_request, */15 schedule) on the fork.
-          # Trigger re-registration MUST use the org GH_PAT: GITHUB_TOKEN has no
-          # `workflows` scope, so these API calls 403 and the re-registration
-          # silently no-ops — which left stale `*/5` polls registered after the
-          # consumer dropped them. Subshell-scope the PAT so gh uses it for
-          # these two calls only.
+          # Re-registration MUST use the minted App token (workflows scope);
+          # GITHUB_TOKEN has no `workflows` scope, so those API calls 403 and the
+          # re-registration silently no-ops. Subshell-scope the token so gh uses
+          # it for these two calls only.
           WF_PATH=".github/workflows/build.yml"
           (
-            export GH_TOKEN="$GH_PAT"
+            export GH_TOKEN="$TOK"
             WF_SHA="$(gh api "repos/${{ github.repository }}/contents/$WF_PATH" --jq '.sha' 2>/dev/null || true)"
             if [ -n "$WF_SHA" ] && [ "$WF_SHA" != "null" ]; then
               gh api -X DELETE "repos/${{ github.repository }}/contents/$WF_PATH" \
@@ -156,54 +174,18 @@ jobs:
               -f content="$(base64 -w0 /tmp/consumer-build.yml)" >/dev/null 2>&1 || \
               echo "::warning::re-add phase failed — triggers may be stale until next sync"
           )
-          # 4. force-push mirror main w/ GH_PAT. Pushing to a URL = anonymous
-          #    remote → --force-with-lease can't map the tracking ref, so pass the
-          #    expected value explicitly (fresh fetch). checkout@v4's
+          # 4. force-push mirror main w/ the minted App token. Pushing to a URL =
+          #    anonymous remote → --force-with-lease can't map the tracking ref, so
+          #    pass the expected value explicitly (fresh fetch). checkout@v4's
           #    persist-credentials sets an Authorization extraheader that would
-          #    override the URL's PAT with the GITHUB_TOKEN — drop it first.
+          #    override the URL's token with the GITHUB_TOKEN — drop it first.
           git config --unset-all http.https://github.com/.extraheader || true
           git config --unset-all credential.helper || true
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
-          git push "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" \
+          git push "https://$TOK@github.com/intarweb/${{ github.event.repository.name }}.git" \
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed; mirror main may drift until next run"
-
-      - name: 🌱 Seed build.yml onto intarweb→upstream PR branches
-        if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # A PR branch cut from UPSTREAM main carries upstream's own workflows (or
-          # none), NOT our canonical build.yml — so pushes to that branch fire
-          # upstream CI or nothing, never our build. GitHub uses the branch's own
-          # workflow file, not main's. Seed the canonical build.yml onto every open
-          # intarweb→upstream PR branch that lacks it, so the NEXT push to the branch
-          # fires our build (push trigger = the real instant event).
-          # Operates in a throwaway clone so it never disturbs this runner's checkout.
-          SEED_DIR="$(mktemp -d)"
-          git clone -q --no-checkout "https://${{ secrets.GH_PAT }}@github.com/intarweb/${{ github.event.repository.name }}.git" "$SEED_DIR"
-          cd "$SEED_DIR"
-          while read -r b; do
-            [ -z "$b" ] && continue
-            git fetch -q origin "$b" 2>/dev/null || continue
-            if git ls-tree "origin/$b" .github/workflows/build.yml >/dev/null 2>&1; then
-              echo "  $b already has build.yml — skip"
-              continue
-            fi
-            echo "  seeding build.yml onto $b"
-            git checkout -q -B seed "origin/$b"
-            mkdir -p .github/workflows
-            cp /tmp/consumer-build.yml .github/workflows/build.yml
-            git add .github/workflows/build.yml
-            git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid               commit -m "ci: seed canonical build.yml onto PR branch [skip ci]" >/dev/null 2>&1 || true
-            git push -q "origin" "HEAD:$b" 2>/dev/null ||               echo "::warning::could not push seed to $b"
-          done < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open             --json headRefName,headRepositoryOwner             --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')
-          # Tolerate git's tmp-file race ("Directory not empty") — this is cleanup,
-          # not a build failure.
-          rm -rf "$SEED_DIR" 2>/dev/null || true
-          echo "  seed complete"
 
       - name: 🌿 Checkout build tree
         if: steps.cls.outputs.skip == 'false'
