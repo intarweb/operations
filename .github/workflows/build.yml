@@ -256,23 +256,33 @@ jobs:
             echo "- open PRs: \`${BRANCHES[*]:-<none>}\`"; \
             echo "- fp: \`sha-$FP\`"; } >> "$GITHUB_STEP_SUMMARY"
 
+      # F5 — moved ABOVE the no-op check (was below 🔍 Locate Dockerfile) so the
+      # check can query GHCR authenticated. The df condition is gone: that step
+      # hasn't run yet at this point.
+      - name: 🔑 Login to GHCR
+        if: steps.cls.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # F5 — the old anonymous ghcr.io/token call only yields a usable token for
+      # PUBLIC packages: a private one returned non-200 → skip=false → full
+      # rebuild + repush on every single run. imagetools uses the login above,
+      # needs no python3, and handles both manifest and index media types.
+      # Fails open (rebuild) on any unexpected error, which is the safe side.
       - name: ⏭️ No-op check (fingerprint already published?)
         id: noop
         if: steps.cls.outputs.skip == 'false'
         run: |
-          FP="sha-${{ steps.fp.outputs.fp }}"
-          T="$(curl -sf "https://ghcr.io/token?scope=repository:intarweb/${{ steps.cls.outputs.image }}:pull" \
-            | python3 -c 'import json,sys;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
-          CODE=000
-          [ -n "$T" ] && CODE="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $T" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json' \
-            "https://ghcr.io/v2/intarweb/${{ steps.cls.outputs.image }}/manifests/$FP")"
-          if [ "$CODE" = "200" ]; then
+          IMG="ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}"
+          if docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "  no-op ($FP present)"
+            echo "  no-op ($IMG present)"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "  building ($FP http $CODE)"
+            echo "  building ($IMG absent)"
           fi
 
       - name: 🍒 Assemble (cherry-pick open PRs onto build tree)
@@ -358,14 +368,6 @@ jobs:
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
         uses: docker/setup-buildx-action@v3
 
-      - name: 🔑 Login to GHCR
-        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: 📦 Build + push :latest + :sha-<fp>
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
         uses: docker/build-push-action@v6
@@ -376,6 +378,11 @@ jobs:
           build-args: ${{ vars.BUILD_ARGS }}
           push: true
           provenance: false
+          # F6 — registry cache, NOT type=gha: multi-arch mode=max blows past the
+          # per-repo Actions cache quota and self-evicts. The daily fork rebuild
+          # with a QEMU-emulated arm64 leg is exactly the workload cache exists for.
+          cache-from: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache,mode=max
           tags: |
             ghcr.io/intarweb/${{ steps.cls.outputs.image }}:latest
             ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}
