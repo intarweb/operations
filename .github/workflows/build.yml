@@ -286,12 +286,20 @@ jobs:
           fi
 
       - name: 🍒 Assemble (cherry-pick open PRs onto build tree)
+        id: pick
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
         run: |
           set -euo pipefail
           git config user.name intarweb-ci
           git config user.email ci@intarweb.invalid
+          APPLIED=""
+          FAILED=""
           for b in ${{ steps.fp.outputs.branches }}; do
+            # F2 — rollback point. A PR lands WHOLE or not at all. Without this,
+            # a PR that conflicts halfway leaves its earlier commits on the tree
+            # while the fingerprint claims the full PR: the tag lies about its
+            # own contents.
+            BASE="$(git rev-parse HEAD)"
             # Linearize the range first: a PR branch with a merge commit in it
             # (e.g. "Merge origin/X into Y") makes `cherry-pick HEAD..pr/$b`
             # fail with "commit ... is a merge but no -m option was given" and
@@ -299,35 +307,45 @@ jobs:
             mapfile -t COMMITS < <(git rev-list --no-merges --reverse "HEAD..pr/$b")
             [ ${#COMMITS[@]} -eq 0 ] && { echo "  no commits to pick for $b"; continue; }
             echo "  cherry-pick ${#COMMITS[@]} commits (linearized) from pr/$b"
+            OK=true
             for c in "${COMMITS[@]}"; do
-              if git cherry-pick -X theirs "$c" 2>/tmp/cp.err; then
-                echo "  applied $c"
+              # F3 — no -X theirs. It silently resolved every upstream-vs-PR
+              # conflict in the PR's favour, so a file upstream rewrote got
+              # clobbered by a stale PR version and still built green. Fail closed.
+              # The old add/add build.yml handler is gone with the seed step (F1).
+              if git cherry-pick "$c" 2>/tmp/cp.err; then
+                echo "    applied $(echo "$c" | cut -c1-7)"
                 continue
               fi
-              # Resolve WITHOUT the overlay file (build.yml) in the way: PR branches
-              # are cut from upstream and carry upstream's own workflows, so the
-              # canonical build.yml we seeded is an add/add conflict. Resolve it
-              # in favor of OUR canonical file and retry the pick so the PR's real
-              # changes (Dockerfile, source) still land.
-              if git checkout --theirs -- .github/workflows/build.yml 2>/dev/null; then
-                git add .github/workflows/build.yml
-                if GIT_EDITOR=true git cherry-pick --continue 2>/tmp/cp2.err; then
-                  echo "  resolved build.yml conflict for $(echo "$c" | cut -c1-7); rest applied"
-                  continue
-                else
-                  git cherry-pick --abort || true
-                  echo "::warning::PR $b conflicts beyond build.yml at $c — skipped; rebase it to fold in"
-                  cat /tmp/cp2.err >&2 || true
-                  break
-                fi
-              else
-                git cherry-pick --abort || true
-                echo "::warning::PR $b conflicts with upstream at $c — skipped (not in :latest); rebase the PR to fold it in"
-                cat /tmp/cp.err >&2 || true
-                break
-              fi
+              git cherry-pick --abort || true
+              echo "::warning::PR $b conflicts with upstream at $(echo "$c" | cut -c1-7) — rolling back the whole PR; rebase it to fold in"
+              cat /tmp/cp.err >&2 || true
+              OK=false
+              break
             done
+            if [ "$OK" = "true" ]; then
+              APPLIED="$APPLIED,$b"
+            else
+              git reset --hard "$BASE"
+              FAILED="$FAILED,$b"
+              echo "  rolled back $b to $(echo "$BASE" | cut -c1-7)"
+            fi
           done
+          A="${APPLIED#,}"
+          F="${FAILED#,}"
+          echo "applied=$A" >> "$GITHUB_OUTPUT"
+          echo "failed=$F"  >> "$GITHUB_OUTPUT"
+          { echo "- applied PRs: \`${A:-<none>}\`"; \
+            echo "- rolled back: \`${F:-<none>}\`"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # F3 (fail-closed) — LAST step on purpose: the image is already pushed with
+      # honest labels listing exactly what applied, and the run still goes red so
+      # the rolled-back PR gets rebased instead of quietly rotting.
+      - name: ❌ Fail if any PR was rolled back
+        if: steps.pick.outputs.failed != ''
+        run: |
+          echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — image published WITHOUT them; rebase and re-run"
+          exit 1
 
       - name: 🔍 Locate Dockerfile + context
         id: df
