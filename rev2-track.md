@@ -24,8 +24,24 @@
   - Consumer already had `workflow_dispatch` + `uses: ...@main` + `secrets: inherit` → per §4, changed nothing and recorded.
   - Hook: `scripts/install-push-hook.sh` installs a per-clone pre-push hook that runs the repo's own `.githooks/pre-push` (fleet gate) then dispatches `build.yml` on intarweb pushes. Fixed during install to CHAIN with the fleet dispatcher, never clobber it (template is Brokkr-owned via host-bootstrap).
   - §9 gate: real push on a fork → `workflow_dispatch` run within ~30s. Verified on metamcp: dispatch `32953913247` created ~15s after push, completed success.
+- [x] **W5 — F1 seed deleted + F8 App token replaces GH_PAT** (`3f5ddd6` PR #8 + fix `c6cf22e`)
+  - F1: deleted the 🌱 seed step that pushed `ci:` commits onto upstream PR heads — instant builds now come client-side from the pre-push dispatch hook (W4), PR diffs stay clean.
+  - F8: mint a per-repo, per-run App token (`actions/create-github-app-token`, `intarweb-sync-bot`) for the sync step's overlay push + trigger re-registration, replacing the org-wide `secrets.GH_PAT` (invariant I4). `permission-contents/workflows: write` only narrow what the App already holds (W0-gated Contents+Workflows RW).
+  - Fix during verify: push mirror main via HTTP `Authorization` extraheader (`git -c http.extraheader`, same mechanism GitHub Actions uses), NOT URL userinfo — git doesn't use an App token in the userinfo and dropped to a headless password prompt ("could not read Password"). Verified: overlay push `+ 4885e487...9448ae91 master -> master (forced update)` with the App token.
+  - §9 gate: App-token sync green on acme.sh; PR #355 head branch carries **zero** `ci:` intarweb-ci commits (F1 seed gone).
 
 ## Log
+
+### W5 (2026-08-26)
+- F1+F8 landed (`3f5ddd6` PR #8 + `c6cf22e` fix): the 🌱 seed step is deleted; the sync
+  step mints a per-repo intarweb-sync-bot App token (`create-github-app-token`) and uses
+  it (as an HTTP `Authorization` extraheader, not URL userinfo) for the overlay push and
+  trigger re-registration. No `secrets.GH_PAT` reference remains in build.yml.
+- **`secrets.GH_PAT` deletion is owner-gated per the brief** — pending Justin's OK after
+  W5 is green.
+- §9 W5 gate: App-token sync succeeds on acme.sh (`Mint` + `Sync` steps green; overlay
+  push `+ 4885e487...9448ae91 master -> master (forced update)`); PR #355 head branch
+  (`intarweb/metamcp`, `fix/consolidated-layer0-clean`) carries **zero** `ci:` commits.
 
 ### W4 (2026-08-26)
 - Landed `scripts/install-push-hook.sh` (PR #5) + fix (PR #6) — installer now chains the
