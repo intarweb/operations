@@ -89,11 +89,11 @@ jobs:
 
       # F8 — the sync step needs a token with contents+workflows scope (writing
       # .github/workflows + force-pushing mirror main), which GITHUB_TOKEN
-      # (packages/contents only, no workflows perm) cannot do. The org-wide GH_PAT
-      # is the last long-lived org-wide credential in the fleet (invariant I4);
-      # replace it with a per-repo, per-run App token from the intarweb-sync-bot
-      # App (W0-gated to hold Contents RW + Workflows RW org-wide). permission-*
-      # inputs only NARROW what the App already holds — they cannot expand it.
+      # (packages/contents only, no workflows perm) cannot do. Replaced the org-wide
+      # GH_PAT (the last long-lived org-wide credential, invariant I4) with a
+      # per-repo, per-run App token from the intarweb-sync-bot App (W0-gated to hold
+      # Contents RW + Workflows RW org-wide). permission-* inputs only NARROW what
+      # the App already holds — they cannot expand it.
       - name: 🪙 Mint intarweb-sync-bot App token (F8)
         id: tok
         if: steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
