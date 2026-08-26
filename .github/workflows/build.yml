@@ -223,13 +223,29 @@ jobs:
             { echo "::warning::some submodules unavailable (private?) — continuing"; true; }
           echo "  building $(git rev-parse HEAD)"
 
-      - name: "🔢 Fingerprint (fork: upstream + sorted PR shas | greenfield: git sha)"
+      - name: "🔢 Fingerprint (fork: upstream + sorted PR shas + build inputs | greenfield: git sha + build inputs)"
         id: fp
         if: steps.cls.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
+          # F4 — via env, not inline ${{ }}: BUILD_ARGS is multiline and
+          # user-controlled, so interpolating it into the script body is both a
+          # quoting hazard and a script-injection surface.
+          V_DOCKERFILE: ${{ vars.DOCKERFILE }}
+          V_CONTEXT: ${{ vars.CONTEXT }}
+          V_PLATFORMS: ${{ vars.PLATFORMS }}
+          V_BUILD_ARGS: ${{ vars.BUILD_ARGS }}
+          V_REBUILD_EPOCH: ${{ vars.REBUILD_EPOCH }}
         run: |
           set -euo pipefail
+          # Build inputs are part of the image identity: changing BUILD_ARGS or
+          # PLATFORMS on a static upstream sha used to hash identically → no-op →
+          # the var change never shipped. REBUILD_EPOCH is the fleet-wide escape
+          # hatch: bump the org variable to force every repo past the no-op gate
+          # (base-image drift, CVE in a FROM layer).
+          INPUTS="$(printf '%s|%s|%s|%s|%s' \
+            "${V_DOCKERFILE:-}" "${V_CONTEXT:-}" "${V_PLATFORMS:-}" \
+            "${V_BUILD_ARGS:-}" "${V_REBUILD_EPOCH:-}" | sha256sum | cut -c1-12)"
           if [ "${{ steps.cls.outputs.fork }}" = "true" ]; then
             MAIN_SHA="${{ steps.sync.outputs.upstream_sha }}"
             mapfile -t BRANCHES < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open \
@@ -243,13 +259,16 @@ jobs:
               echo "  PR branch $b -> $(git rev-parse "pr/$b")"
             done
             SORTED="$(printf '%s\n' $PR_SHAS | sort | tr '\n' ' ')"
-            FP="$(printf '%s %s' "$MAIN_SHA" "$SORTED" | sha256sum | cut -c1-12)"
+            FP="$(printf '%s %s %s' "$MAIN_SHA" "$SORTED" "$INPUTS" | sha256sum | cut -c1-12)"
             echo "branches=${BRANCHES[*]:-}" >> "$GITHUB_OUTPUT"
           else
-            FP="$(git rev-parse HEAD | cut -c1-12)"
+            # Greenfield fp is no longer the bare git sha — build inputs fold in
+            # too, so a BUILD_ARGS change ships without an empty commit.
+            FP="$(printf '%s %s' "$(git rev-parse HEAD)" "$INPUTS" | sha256sum | cut -c1-12)"
             echo "branches=" >> "$GITHUB_OUTPUT"
           fi
           echo "fp=$FP" >> "$GITHUB_OUTPUT"
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           { echo "### ${{ steps.cls.outputs.image }}"; \
             echo "- fork: \`${{ steps.cls.outputs.fork }}\` upstream: \`${{ steps.cls.outputs.upstream }}\`"; \
             echo "- head: \`$(git rev-parse HEAD)\`"; \
@@ -401,6 +420,15 @@ jobs:
           # with a QEMU-emulated arm64 leg is exactly the workload cache exists for.
           cache-from: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache
           cache-to: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache,mode=max
+          # F7 — image.source is what makes GHCR auto-link the package to this
+          # repo, which is what grants GITHUB_TOKEN write access to it. Required
+          # where IMAGE_NAME != repo name (mcp-neo4j → neo4j-memory,
+          # vllm → vllm-openai): those packages do not self-link.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.fp.outputs.head }}
+            org.opencontainers.image.version=sha-${{ steps.fp.outputs.fp }}
+            org.opencontainers.image.description=upstream ${{ steps.cls.outputs.upstream }} + intarweb PRs [${{ steps.pick.outputs.applied }}]
           tags: |
             ghcr.io/intarweb/${{ steps.cls.outputs.image }}:latest
             ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}
