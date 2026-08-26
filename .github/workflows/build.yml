@@ -282,9 +282,19 @@ jobs:
           git config user.name intarweb-ci
           git config user.email ci@intarweb.invalid
           for b in ${{ steps.fp.outputs.branches }}; do
-            echo "  cherry-pick HEAD..pr/$b"
-            if ! git cherry-pick -X theirs "HEAD..pr/$b" 2>/tmp/cp.err; then
-              # Retry WITHOUT the overlay file (build.yml) in the way: PR branches
+            # Linearize the range first: a PR branch with a merge commit in it
+            # (e.g. "Merge origin/X into Y") makes `cherry-pick HEAD..pr/$b`
+            # fail with "commit ... is a merge but no -m option was given" and
+            # skip the WHOLE PR. Pick each non-merge commit in order instead.
+            mapfile -t COMMITS < <(git rev-list --no-merges --reverse "HEAD..pr/$b")
+            [ ${#COMMITS[@]} -eq 0 ] && { echo "  no commits to pick for $b"; continue; }
+            echo "  cherry-pick ${#COMMITS[@]} commits (linearized) from pr/$b"
+            for c in "${COMMITS[@]}"; do
+              if git cherry-pick -X theirs "$c" 2>/tmp/cp.err; then
+                echo "  applied $c"
+                continue
+              fi
+              # Resolve WITHOUT the overlay file (build.yml) in the way: PR branches
               # are cut from upstream and carry upstream's own workflows, so the
               # canonical build.yml we seeded is an add/add conflict. Resolve it
               # in favor of OUR canonical file and retry the pick so the PR's real
@@ -292,18 +302,21 @@ jobs:
               if git checkout --theirs -- .github/workflows/build.yml 2>/dev/null; then
                 git add .github/workflows/build.yml
                 if GIT_EDITOR=true git cherry-pick --continue 2>/tmp/cp2.err; then
-                  echo "  resolved build.yml conflict for $b; rest applied"
+                  echo "  resolved build.yml conflict for $(echo "$c" | cut -c1-7); rest applied"
+                  continue
                 else
                   git cherry-pick --abort || true
-                  echo "::warning::PR $b conflicts beyond build.yml — skipped; rebase it to fold in"
+                  echo "::warning::PR $b conflicts beyond build.yml at $c — skipped; rebase it to fold in"
                   cat /tmp/cp2.err >&2 || true
+                  break
                 fi
               else
                 git cherry-pick --abort || true
-                echo "::warning::PR $b conflicts with upstream — skipped (not in :latest); rebase the PR to fold it in"
+                echo "::warning::PR $b conflicts with upstream at $c — skipped (not in :latest); rebase the PR to fold it in"
                 cat /tmp/cp.err >&2 || true
+                break
               fi
-            fi
+            done
           done
 
       - name: 🔍 Locate Dockerfile + context
