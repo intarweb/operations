@@ -174,16 +174,22 @@ jobs:
               -f content="$(base64 -w0 /tmp/consumer-build.yml)" >/dev/null 2>&1 || \
               echo "::warning::re-add phase failed — triggers may be stale until next sync"
           )
-          # 4. force-push mirror main w/ the minted App token. Pushing to a URL =
-          #    anonymous remote → --force-with-lease can't map the tracking ref, so
-          #    pass the expected value explicitly (fresh fetch). checkout@v4's
-          #    persist-credentials sets an Authorization extraheader that would
-          #    override the URL's token with the GITHUB_TOKEN — drop it first.
+          # 4. force-push mirror main w/ the minted App token. Pass it as an HTTP
+          #    Authorization extraheader (the same mechanism checkout@v4 / GitHub
+          #    Actions uses) — NOT as a URL userinfo: `https://$TOK@github.com`
+          #    parses fine for a PAT but a GitHub App token in the userinfo is not
+          #    used by git for auth, so git drops to a password prompt and fails
+          #    headlessly with "could not read Password". The push runs against an
+          #    anonymous URL → --force-with-lease can't map the tracking ref, so
+          #    pass the expected value explicitly (fresh fetch). Drop checkout@v4's
+          #    persist-credentials extraheader first so it can't override ours.
           git config --unset-all http.https://github.com/.extraheader || true
           git config --unset-all credential.helper || true
+          AUTH="$(printf 'x-access-token:%s' "$TOK" | base64 | tr -d '\n')"
           git fetch --quiet origin
           EXPECTED="$(git rev-parse "refs/remotes/origin/$DEFAULT")"
-          git push "https://$TOK@github.com/intarweb/${{ github.event.repository.name }}.git" \
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" push \
+            "https://github.com/intarweb/${{ github.event.repository.name }}.git" \
             "$DEFAULT:refs/heads/$DEFAULT" --force-with-lease="refs/heads/$DEFAULT:$EXPECTED" || \
             echo "::warning::overlay push failed; mirror main may drift until next run"
 
