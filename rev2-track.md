@@ -33,8 +33,25 @@
   - Only workflow on the fork is the canonical `build.yml` (legacy `docker-publish.yml` already removed during onboarding).
   - No `IMAGE_NAME` var → image defaults to `metamcp` (confirmed correct with owner).
   - `ghcr.io/intarweb/metamcp:latest` published (tags `sha-b373d91fa60a,latest`), F7 labels present (`source/revision/version`). Builds green (recent `32955217909` success).
+- [ ] **W7 — F10 named image variants** (`DOCKER_TARGET` + `IMAGE_VARIANTS`)
+  - F10a: `DOCKER_TARGET` pins the stage the default build targets. Unset builds the Dockerfile's LAST stage, so appending a stage upstream silently moves `:latest` to a different image (mcp-gateway: `runtime` → `runtime-full`, ~42 MiB → Node+uv+git).
+  - F10b: `IMAGE_VARIANTS` publishes extra named stages of the same folded tree as `:latest-<suffix>` + `:sha-<fp>-<suffix>`. Opt-in per repo via repo Variable; the workflow names no repo and unset reproduces current behaviour exactly.
+  - Both fold into the fingerprint `INPUTS` (F4 rule: a build-input change must change image identity) and every variant is probed by the no-op check, so a variant cannot be skipped once the default tag exists.
 
 ## Log
+
+### W7 (2026-09-22)
+- F10 named image variants. Two optional repo Variables:
+  - `DOCKER_TARGET` — stage for the default build. Closes the silent-move hazard:
+    a target-less build means "last stage in the Dockerfile", so appending a stage
+    upstream relocates `:latest` without any change on our side.
+  - `IMAGE_VARIANTS` — space-separated `suffix:stage`; each publishes
+    `:latest-<suffix>` + `:sha-<fp>-<suffix>` from the same folded tree.
+- Both fold into the fingerprint `INPUTS` (F4), and the no-op check probes every
+  variant tag so a new variant cannot be skipped once the default tag exists.
+- Generic by construction: no repo is named in the workflow, unset reproduces the
+  single-image behaviour exactly, and any repo in the pool opts in with a Variable.
+- Parse logic exercised on six cases; YAML validated.
 
 ### W6 (2026-08-26)
 - F9 onboard/verify metamcp: no code change. Confirmed the fork carries only the
