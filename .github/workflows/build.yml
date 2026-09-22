@@ -25,7 +25,18 @@ name: build
 #
 # Fingerprint = sha256(upstream/main sha + sorted open-PR shas). If
 # ghcr.io/intarweb/<name>:sha-<fp> already exists, the build is a no-op.
-# Optional repo Variables (with sane defaults): DOCKERFILE, CONTEXT, PLATFORMS.
+# Optional repo Variables (with sane defaults): DOCKERFILE, CONTEXT, PLATFORMS,
+# BUILD_ARGS, REBUILD_EPOCH, IMAGE_NAME, DOCKER_TARGET, IMAGE_VARIANTS.
+#
+#   DOCKER_TARGET   stage for the default build. Unset builds the Dockerfile's
+#                   LAST stage, which silently changes meaning when a stage is
+#                   appended upstream — set it wherever that would move :latest.
+#
+#   IMAGE_VARIANTS  space-separated `suffix:stage` pairs. Each is the same
+#                   Dockerfile, same folded tree, built at that stage and
+#                   published as :latest-<suffix> + :sha-<fp>-<suffix> alongside
+#                   the default :latest. Unset = one image, unchanged.
+#                   e.g. IMAGE_VARIANTS=full:runtime-full
 
 on:
   workflow_call:
@@ -224,16 +235,35 @@ jobs:
           V_PLATFORMS: ${{ vars.PLATFORMS }}
           V_BUILD_ARGS: ${{ vars.BUILD_ARGS }}
           V_REBUILD_EPOCH: ${{ vars.REBUILD_EPOCH }}
+          V_DOCKER_TARGET: ${{ vars.DOCKER_TARGET }}
+          V_IMAGE_VARIANTS: ${{ vars.IMAGE_VARIANTS }}
         run: |
           set -euo pipefail
-          # Build inputs are part of the image identity: changing BUILD_ARGS or
-          # PLATFORMS on a static upstream sha used to hash identically → no-op →
-          # the var change never shipped. REBUILD_EPOCH is the fleet-wide escape
+          # Build inputs are part of the image identity: a BUILD_ARGS or
+          # PLATFORMS change on a static upstream sha otherwise hashes
+          # identically → no-op → the var change never ships. REBUILD_EPOCH is the fleet-wide escape
           # hatch: bump the org variable to force every repo past the no-op gate
-          # (base-image drift, CVE in a FROM layer).
-          INPUTS="$(printf '%s|%s|%s|%s|%s' \
+          # (base-image drift, CVE in a FROM layer). DOCKER_TARGET and
+          # IMAGE_VARIANTS are here for the same reason: adding or retargeting a
+          # variant changes the artifact, so it must change the fingerprint.
+          INPUTS="$(printf '%s|%s|%s|%s|%s|%s|%s' \
             "${V_DOCKERFILE:-}" "${V_CONTEXT:-}" "${V_PLATFORMS:-}" \
-            "${V_BUILD_ARGS:-}" "${V_REBUILD_EPOCH:-}" | sha256sum | cut -c1-12)"
+            "${V_BUILD_ARGS:-}" "${V_REBUILD_EPOCH:-}" \
+            "${V_DOCKER_TARGET:-}" "${V_IMAGE_VARIANTS:-}" | sha256sum | cut -c1-12)"
+          # Variants: the default build is always first, with an empty suffix.
+          # IMAGE_VARIANTS adds `suffix:target` entries — a NAMED stage of the
+          # same Dockerfile, built from the same folded tree, published under a
+          # `-suffix` tag family. A repo opts in by setting the variable; nothing
+          # here names a repo, and unset reproduces the single-image behaviour
+          # exactly.
+          VARIANTS=":${V_DOCKER_TARGET:-}"
+          for entry in ${V_IMAGE_VARIANTS:-}; do
+            case "$entry" in
+              *:*) VARIANTS="$VARIANTS $entry" ;;
+              *) echo "::error::IMAGE_VARIANTS entry '$entry' is not suffix:target"; exit 1 ;;
+            esac
+          done
+          echo "variants=$VARIANTS" >> "$GITHUB_OUTPUT"
           if [ "${{ steps.cls.outputs.fork }}" = "true" ]; then
             MAIN_SHA="${{ steps.sync.outputs.upstream_sha }}"
             mapfile -t BRANCHES < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open \
@@ -282,14 +312,27 @@ jobs:
       - name: ⏭️ No-op check (fingerprint already published?)
         id: noop
         if: steps.cls.outputs.skip == 'false'
+        env:
+          VARIANTS: ${{ steps.fp.outputs.variants }}
+          IMAGE: ${{ steps.cls.outputs.image }}
+          FP: ${{ steps.fp.outputs.fp }}
         run: |
-          IMG="ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}"
-          if docker buildx imagetools inspect "$IMG" >/dev/null 2>&1; then
+          set -euo pipefail
+          # Every variant must be present before this is a no-op: the sha tag is
+          # per-variant, so probing only the default would skip a variant the
+          # moment the base image exists and never publish it.
+          MISSING=""
+          for v in $VARIANTS; do
+            sfx="${v%%:*}"; sfx="${sfx:+-$sfx}"
+            IMG="ghcr.io/intarweb/${IMAGE}:sha-${FP}${sfx}"
+            docker buildx imagetools inspect "$IMG" >/dev/null 2>&1 || MISSING="$MISSING $IMG"
+          done
+          if [ -z "$MISSING" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "  no-op ($IMG present)"
+            echo "  no-op (all variant tags present)"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
-            echo "  building ($IMG absent)"
+            echo "  building (absent:$MISSING)"
           fi
 
       - name: 🍒 Assemble (cherry-pick open PRs onto build tree)
@@ -393,30 +436,59 @@ jobs:
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
         uses: docker/setup-buildx-action@v3
 
-      - name: 📦 Build + push :latest + :sha-<fp>
+      - name: 📦 Build + push every variant
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ steps.df.outputs.ctx }}
-          file: ${{ steps.df.outputs.df }}
-          platforms: ${{ vars.PLATFORMS || 'linux/amd64,linux/arm64' }}
-          build-args: ${{ vars.BUILD_ARGS }}
-          push: true
-          provenance: false
+        env:
+          VARIANTS: ${{ steps.fp.outputs.variants }}
+          IMAGE: ${{ steps.cls.outputs.image }}
+          FP: ${{ steps.fp.outputs.fp }}
+          HEAD_SHA: ${{ steps.fp.outputs.head }}
+          UPSTREAM: ${{ steps.cls.outputs.upstream }}
+          APPLIED: ${{ steps.pick.outputs.applied }}
+          DF: ${{ steps.df.outputs.df }}
+          CTX: ${{ steps.df.outputs.ctx }}
+          V_PLATFORMS: ${{ vars.PLATFORMS }}
+          V_BUILD_ARGS: ${{ vars.BUILD_ARGS }}
+        run: |
+          set -euo pipefail
+          PLATFORMS="${V_PLATFORMS:-linux/amd64,linux/arm64}"
           # F6 — registry cache, NOT type=gha: multi-arch mode=max blows past the
-          # per-repo Actions cache quota and self-evicts. The daily fork rebuild
-          # with a QEMU-emulated arm64 leg is exactly the workload cache exists for.
-          cache-from: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache
-          cache-to: type=registry,ref=ghcr.io/intarweb/${{ steps.cls.outputs.image }}:buildcache,mode=max
+          # per-repo Actions cache quota and self-evicts. A variant builds FROM
+          # the default stage, so the second build is a cache hit on shared
+          # layers, not a second full build.
+          CACHE="type=registry,ref=ghcr.io/intarweb/${IMAGE}:buildcache"
+
+          BARG=()
+          while IFS= read -r a; do
+            if [ -n "$a" ]; then BARG+=(--build-arg "$a"); fi
+          done < <(printf '%s\n' "${V_BUILD_ARGS:-}")
+
           # F7 — image.source is what makes GHCR auto-link the package to this
           # repo, which is what grants GITHUB_TOKEN write access to it. Required
           # where IMAGE_NAME != repo name (mcp-neo4j → neo4j-memory,
           # vllm → vllm-openai): those packages do not self-link.
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ steps.fp.outputs.head }}
-            org.opencontainers.image.version=sha-${{ steps.fp.outputs.fp }}
-            org.opencontainers.image.description=upstream ${{ steps.cls.outputs.upstream }} + intarweb PRs [${{ steps.pick.outputs.applied }}]
-          tags: |
-            ghcr.io/intarweb/${{ steps.cls.outputs.image }}:latest
-            ghcr.io/intarweb/${{ steps.cls.outputs.image }}:sha-${{ steps.fp.outputs.fp }}
+          LABELS=(
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+            --label "org.opencontainers.image.revision=${HEAD_SHA}"
+            --label "org.opencontainers.image.version=sha-${FP}"
+            --label "org.opencontainers.image.description=upstream ${UPSTREAM} + intarweb PRs [${APPLIED}]"
+          )
+
+          for v in $VARIANTS; do
+            sfx="${v%%:*}"; tgt="${v#*:}"
+            tag_sfx=""
+            if [ -n "$sfx" ]; then tag_sfx="-$sfx"; fi
+            TARGET=()
+            if [ -n "$tgt" ]; then TARGET=(--target "$tgt"); fi
+            echo "▸ variant '${sfx:-default}' → :latest${tag_sfx} :sha-${FP}${tag_sfx} target=${tgt:-<default>}"
+            docker buildx build \
+              --file "$DF" \
+              --platform "$PLATFORMS" \
+              --provenance=false \
+              --cache-from "$CACHE" \
+              --cache-to "${CACHE},mode=max" \
+              "${TARGET[@]}" "${BARG[@]}" "${LABELS[@]}" \
+              --tag "ghcr.io/intarweb/${IMAGE}:latest${tag_sfx}" \
+              --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}${tag_sfx}" \
+              --push "$CTX"
+          done
