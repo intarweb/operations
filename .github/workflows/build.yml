@@ -367,6 +367,19 @@ jobs:
                 echo "    applied $(echo "$c" | cut -c1-7)"
                 continue
               fi
+              # An empty cherry-pick means the change is ALREADY on the tree: the same
+              # commit carried by more than one open PR, or a PR stacked on another. That
+              # is not a conflict between the PR and upstream, and failing closed on it
+              # rolls back a PR that is fine.
+              #
+              # Detected by STATE, not by message: git writes "The previous cherry-pick
+              # is now empty" to STDOUT, so the stderr capture below never sees it. A
+              # cherry-pick in progress with no conflicted paths is the empty case.
+              if [ -f .git/CHERRY_PICK_HEAD ] && [ -z "$(git diff --name-only --diff-filter=U)" ]; then
+                git cherry-pick --skip >/dev/null 2>&1 || git cherry-pick --abort >/dev/null 2>&1 || true
+                echo "    already on the tree, skipped $(echo "$c" | cut -c1-7)"
+                continue
+              fi
               git cherry-pick --abort || true
               echo "::warning::PR $b conflicts with upstream at $(echo "$c" | cut -c1-7) — rolling back the whole PR; rebase it to fold in"
               cat /tmp/cp.err >&2 || true
