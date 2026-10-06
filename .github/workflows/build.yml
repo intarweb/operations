@@ -61,9 +61,8 @@ jobs:
           [ -n "$PARENT" ] && IS_FORK="true"
           DEFAULT="${{ github.event.repository.default_branch }}"
           # Sync target = the UPSTREAM's default branch. A fork's own default may
-          # differ (bifrost forks main but upstream maximhq/bifrost defaults to dev
-          # — the mirror tracks dev). Every other fork's default == upstream's, so
-          # this is behavior-neutral for them.
+          # differ from its upstream's — the mirror tracks the upstream default
+          # either way, so this is behavior-neutral where the two already match.
           UP_DEFAULT="$DEFAULT"
           if [ "$IS_FORK" = "true" ]; then
             UP_DEFAULT="$(gh api "repos/$PARENT" --jq '.default_branch' 2>/dev/null || echo "$DEFAULT")"
@@ -130,8 +129,7 @@ jobs:
           UP_DEFAULT="${{ steps.cls.outputs.up_default }}"
           # 1. put us on the fork's default branch (detached on schedule/dispatch)
           git checkout -B "$DEFAULT" "origin/$DEFAULT"
-          # 2. hard-reset to upstream's default branch → pure mirror (bifrost:
-          #    upstream default is dev, tracked into fork main)
+          # 2. hard-reset to upstream's default branch → pure mirror
           git fetch --quiet "$UPSTREAM_URL" "$UP_DEFAULT"
           UPSTREAM_SHA="$(git rev-parse FETCH_HEAD)"
           git reset --hard "$UPSTREAM_SHA"
