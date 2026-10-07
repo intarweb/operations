@@ -178,10 +178,17 @@ jobs:
                 -f sha="$WF_SHA" >/dev/null 2>&1 || \
                 echo "::warning::delete phase failed (will re-add anyway)"
             fi
-            gh api -X PUT "repos/${{ github.repository }}/contents/$WF_PATH" \
-              -f message="ci: re-register build workflow with canonical triggers (re-add phase) [skip ci]" \
-              -f content="$(base64 -w0 /tmp/consumer-build.yml)" >/dev/null 2>&1 || \
-              echo "::warning::re-add phase failed — triggers may be stale until next sync"
+            # The delete above removes the very file that runs this workflow, so a re-add that doesn't land
+            # leaves the repo with no build at all and nothing left to repair it (acme.sh: deleted
+            # 2026-09-13, no build since). Retry, confirm the file is back, and fail loudly if not.
+            for attempt in 1 2 3 4 5; do
+              gh api -X PUT "repos/${{ github.repository }}/contents/$WF_PATH" \
+                -f message="ci: re-register build workflow with canonical triggers (re-add phase) [skip ci]" \
+                -f content="$(base64 -w0 /tmp/consumer-build.yml)" >/dev/null 2>&1 || true
+              gh api "repos/${{ github.repository }}/contents/$WF_PATH" --jq '.sha' >/dev/null 2>&1 && break
+              [ "$attempt" = 5 ] && { echo "::error::re-add phase failed 5 times: $WF_PATH is GONE from the default branch, so no build can run here until it is restored by hand"; exit 1; }
+              sleep $((attempt * 5))
+            done
           )
           # 4. force-push mirror main w/ the minted App token. Pass it as an HTTP
           #    Authorization extraheader (the same mechanism checkout@v4 / GitHub
