@@ -264,9 +264,15 @@ jobs:
           echo "variants=$VARIANTS" >> "$GITHUB_OUTPUT"
           if [ "${{ steps.cls.outputs.fork }}" = "true" ]; then
             MAIN_SHA="${{ steps.sync.outputs.upstream_sha }}"
-            mapfile -t BRANCHES < <(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open \
+            # --limit: gh pr list returns only the 30 newest by default. Once upstream had more open PRs
+            # than that, ours fell off the page and every build silently folded none (mcp-gateway,
+            # 2026-10-06: 78 open upstream, ours older). Fail on a lookup error rather than build an
+            # image without our PRs.
+            OPEN_PRS="$(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open --limit 1000 \
               --json headRefName,headRepositoryOwner \
-              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')
+              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')" \
+              || { echo "::error::could not list open PRs on ${{ steps.cls.outputs.upstream }}"; exit 1; }
+            mapfile -t BRANCHES <<<"$OPEN_PRS"
             PR_SHAS=""
             for b in "${BRANCHES[@]:-}"; do
               [ -z "$b" ] && continue
