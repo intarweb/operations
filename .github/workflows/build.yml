@@ -473,7 +473,15 @@ jobs:
           # layers, not a second full build.
           CACHE="type=registry,ref=ghcr.io/intarweb/${IMAGE}:buildcache"
 
-          BARG=()
+          BARG=(
+            # The image's OCI labels say what it is; its environment does not.
+            # A container that reports RSM_VERSION=dev cannot answer "which
+            # build am I" from the inside, and the labels are not readable from
+            # the process. Generic names, so any repo can consume them without
+            # the overlay knowing the repo.
+            --build-arg "BUILD_VERSION=sha-${FP}"
+            --build-arg "BUILD_REVISION=${HEAD_SHA}"
+          )
           while IFS= read -r a; do
             if [ -n "$a" ]; then BARG+=(--build-arg "$a"); fi
           done < <(printf '%s\n' "${V_BUILD_ARGS:-}")
