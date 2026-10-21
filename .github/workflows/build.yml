@@ -412,15 +412,6 @@ jobs:
           { echo "- applied PRs: \`${A:-<none>}\`"; \
             echo "- rolled back: \`${F:-<none>}\`"; } >> "$GITHUB_STEP_SUMMARY"
 
-      # F3 (fail-closed) — LAST step on purpose: the image is already pushed with
-      # honest labels listing exactly what applied, and the run still goes red so
-      # the rolled-back PR gets rebased instead of quietly rotting.
-      - name: ❌ Fail if any PR was rolled back
-        if: steps.pick.outputs.failed != ''
-        run: |
-          echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — image published WITHOUT them; rebase and re-run"
-          exit 1
-
       - name: 🔍 Locate Dockerfile + context
         id: df
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
@@ -516,3 +507,12 @@ jobs:
               --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}${tag_sfx}" \
               --push "$CTX"
           done
+
+      # F3 (fail-closed) — LAST step on purpose: the image is already pushed with
+      # honest labels listing exactly what applied, and the run still goes red so
+      # the rolled-back PR gets rebased instead of quietly rotting.
+      - name: ❌ Fail if any PR was rolled back
+        if: always() && steps.pick.outputs.failed != ''
+        run: |
+          echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — image published WITHOUT them; rebase and re-run"
+          exit 1
