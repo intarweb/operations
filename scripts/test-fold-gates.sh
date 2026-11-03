@@ -110,9 +110,33 @@ check "the tag constructor is inline in the workflow, not a separate file" yes \
 check "no tag-args script is expected to exist in a caller checkout" yes \
   "$([ -e "$HERE/tag-args.sh" ] && echo no || echo yes)"
 
-echo "label: the build stamps its own completeness"
-check "the push sets the fold label" yes \
-  "$(grep -q 'net.siliconspirit.intarweb.fold=complete' "$WF" && echo yes || echo no)"
+echo "label: the build stamps its own completeness, and it must tell the truth"
+# The label value is derived from COMPLETE in the workflow; assert the mapping
+# the workflow actually performs, not a copy of it.
+LABEL_EXPR="$(grep -oF 'intarweb.fold=${COMPLETE_LABEL}' "$WF" | head -1 || true)"
+check "the fold label is derived, not hard-coded to complete" yes \
+  "$([ -n "$LABEL_EXPR" ] && echo yes || echo no)"
+check "no hard-coded fold=complete survives in the label list" yes \
+  "$(grep -q 'fold=complete"' "$WF" && echo no || echo yes)"
+
+# The derivation and the label line must be wired together: if the label is
+# hard-coded, the COMPLETE_LABEL assignment is dead and the label lies.
+label_for() { # mirror the workflow's own derivation, read from the file
+  local derives
+  derives="$(grep -c 'COMPLETE_LABEL=complete' "$WF" || true)"
+  local uses
+  uses="$(grep -cF 'intarweb.fold=${COMPLETE_LABEL}' "$WF" || true)"
+  if [ "$derives" -ge 1 ] && [ "$uses" -ge 1 ]; then
+    case "$1" in true) echo complete ;; *) echo partial ;; esac
+  else
+    echo UNKNOWN
+  fi
+}
+check "a complete fold labels the image complete" complete "$(label_for true)"
+check "a rolled-back fold labels the image partial" partial "$(label_for false)"
+
+check "the no-op probe accepts only an exact complete" yes \
+  "$(grep -q 'all(. == \"complete\")' "$WF" && echo yes || echo no)"
 
 if [ "$fails" -gt 0 ]; then
   printf '\n%d check(s) failed\n' "$fails"

@@ -538,12 +538,12 @@ jobs:
             --label "org.opencontainers.image.revision=${HEAD_SHA}"
             --label "org.opencontainers.image.version=sha-${FP}"
             --label "org.opencontainers.image.description=upstream ${UPSTREAM} + intarweb PRs [${APPLIED}]"
-            # Fold completeness travels WITH the image. The no-op check below
-            # reads this label, so an already-published image short-circuits the
-            # build only if the run that published it rolled nothing back: a
-            # partial image and a good one are otherwise indistinguishable from
-            # outside, and the no-op path reports success on either.
-            --label "net.siliconspirit.intarweb.fold=complete"
+            # Fold completeness travels WITH the image, and must match what was
+            # actually published: a rolled-back tree goes to :partial-sha-<fp>
+            # and says "partial". The no-op check reads this label, so an
+            # already-published image short-circuits the build only if the run
+            # that published it rolled nothing back.
+            --label "net.siliconspirit.intarweb.fold=${COMPLETE_LABEL}"
           )
 
           # A complete fold publishes :latest + :sha-<fp>; a rolled-back one
@@ -575,6 +575,8 @@ jobs:
           # tag-args:end
           COMPLETE="${{ steps.tags.outputs.complete }}"
           mapfile -t TAG_NAMES < <(if [ "$COMPLETE" = "true" ]; then tag_names complete "${FP}"; else tag_names partial "${FP}"; fi)
+          # Same fact the tag set encodes, stated on the image itself.
+          if [ "$COMPLETE" = "true" ]; then COMPLETE_LABEL=complete; else COMPLETE_LABEL=partial; fi
 
           for v in $VARIANTS; do
             sfx="${v%%:*}"; tgt="${v#*:}"
