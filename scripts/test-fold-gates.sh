@@ -53,13 +53,14 @@ check "an empty map rebuilds" dirty \
   "$(printf '{}' > "$HERE/fixtures/.empty.json"; label_verdict "$HERE/fixtures/.empty.json")"
 rm -f "$HERE/fixtures/.empty.json"
 
+source "$HERE/tag-args.sh"
 echo "publish gate: a rolled-back build cannot take :latest or :sha-<fp>"
 check "the tag decision exists and is keyed on the rollback list" yes \
   "$(grep -q "Decide the published tag set" "$WF" && grep -q 'steps.pick.outputs.failed' "$WF" && echo yes || echo no)"
 check "a complete fold publishes :latest and :sha-<fp>" yes \
-  "$(grep -q 'TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:latest" --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}")' "$WF" && echo yes || echo no)"
+  "$(tag_names complete abc | tr '\n' ' ' | grep -qx 'latest sha-abc ' && echo yes || echo no)"
 check "a rolled-back fold publishes :partial-sha-<fp> only" yes \
-  "$(grep -q 'TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:partial-sha-${FP}")' "$WF" && echo yes || echo no)"
+  "$(tag_names partial abc | tr '\n' ' ' | grep -qx 'partial-sha-abc ' && echo yes || echo no)"
 check "the push uses the decided tag set" yes \
   "$(grep -qF 'TAGS[@]/%/' "$WF" && echo yes || echo no)"
 check "no unconditional :latest tag survives in the push" yes \
@@ -67,27 +68,27 @@ check "no unconditional :latest tag survives in the push" yes \
 check "the run still goes red when a PR was rolled back" yes \
   "$(grep -q "Fail when the fold was incomplete" "$WF" && echo yes || echo no)"
 
-echo "variant rows: a partial build never emits a good tag, at any suffix"
-# Mirror the workflow's own expression: TAGS entries get the variant suffix appended.
-tags_for() { # tags_for <complete|partial> <variant suffix, empty for default>
-  local t=()
-  if [ "$1" = complete ]; then
-    t=(":latest" ":sha-abc123")
-  else
-    t=(":partial-sha-abc123")
-  fi
-  printf '%s\n' "${t[@]/%/$2}"
+echo "variant rows: the real tag constructor, still a valid argv when suffixed"
+# Executes scripts/tag-args.sh — the same file the workflow sources. It must
+# never suffix the --tag flags: --tag-full is not a flag and buildx rejects it.
+source "$HERE/tag-args.sh"
+argv() { # argv <complete|partial> <suffix>
+  local names
+  mapfile -t names < <(tag_names "$1" abc123)
+  tag_args "ghcr.io/x/a" "$2" "${names[@]}" | sed 's/ $//'
 }
-check "complete, default variant: latest + sha" ":latest :sha-abc123" \
-  "$(tags_for complete '' | tr '\n' ' ' | sed 's/ $//')"
-check "complete, named variant: suffixed latest + sha" ":latest-foo :sha-abc123-foo" \
-  "$(tags_for complete '-foo' | tr '\n' ' ' | sed 's/ $//')"
-check "partial, default variant: partial only" ":partial-sha-abc123" \
-  "$(tags_for partial '' | tr '\n' ' ' | sed 's/ $//')"
-check "partial, named variant: partial only, suffixed" ":partial-sha-abc123-foo" \
-  "$(tags_for partial '-foo' | tr '\n' ' ' | sed 's/ $//')"
-check "a partial tag set contains no latest and no plain sha tag" yes \
-  "$(tags_for partial '-foo' | grep -qE ':latest|:sha-' && echo no || echo yes)"
+check "complete, default: latest + sha, both flagged" \
+  "--tag ghcr.io/x/a:latest --tag ghcr.io/x/a:sha-abc123" "$(argv complete '')"
+check "complete, -full variant: flags stay flags" \
+  "--tag ghcr.io/x/a:latest-full --tag ghcr.io/x/a:sha-abc123-full" "$(argv complete '-full')"
+check "partial, default: partial tag only" \
+  "--tag ghcr.io/x/a:partial-sha-abc123" "$(argv partial '')"
+check "partial, -full variant: partial only, suffixed" \
+  "--tag ghcr.io/x/a:partial-sha-abc123-full" "$(argv partial '-full')"
+check "no suffixed argv contains a mangled flag" yes \
+  "$(argv complete '-full' | grep -q -- '--tag-' && echo no || echo yes)"
+check "every element of a suffixed argv is --tag or a tag" yes \
+  "$(argv complete '-full' | tr ' ' '\n' | grep -v '^$' | grep -qvE '^(--tag|ghcr\.io/)' && echo no || echo yes)"
 
 echo "label: the build stamps its own completeness"
 check "the push sets the fold label" yes \

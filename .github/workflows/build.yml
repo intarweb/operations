@@ -338,11 +338,11 @@ jobs:
             IMG="ghcr.io/intarweb/${IMAGE}:sha-${FP}${sfx}"
             docker buildx imagetools inspect "$IMG" >/dev/null 2>&1 || MISSING="$MISSING $IMG"
           done
-          # A present tag is not enough. The image must also say our PRs all
-          # folded: a rolled-back build publishes `:latest` and `:sha-<fp>` too,
-          # so without this the no-op path takes a partial image as finished and
-          # reports success having asserted nothing. Absent or partial label ⇒
-          # rebuild.
+          # A present tag is not enough, for two reasons. Images published
+          # before the tag-set split carry `:sha-<fp>` from a rolled-back build;
+          # and any image can be pushed by a run whose fold was short. The label
+          # says the fold completed, so require it. Absent or non-"complete"
+          # label on any platform ⇒ rebuild.
           CLEAN=""
           if [ -z "$MISSING" ]; then
             # `{{ json .Image }}` is a map keyed by platform on a multi-arch
@@ -549,11 +549,16 @@ jobs:
           # A complete fold publishes :latest + :sha-<fp>; a rolled-back one
           # publishes ONLY :partial-sha-<fp>, so `:sha-<fp>` existing is itself
           # the proof the fold was complete. One mechanism, no index parsing.
-          if [ "${{ steps.tags.outputs.complete }}" = "true" ]; then
-            TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:latest" --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}")
-          else
-            TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:partial-sha-${FP}")
-          fi
+          # Tag NAMES only; the --tag flags and the variant suffix are applied
+          # per variant below. Expanding "${TAGS[@]/%/${tag_sfx}}" over the
+          # argv would suffix the flags too, producing --tag-full, which buildx
+          # rejects — every suffixed variant fails while the default passes.
+          # The tag construction lives in scripts/tag-args.sh so the test runs
+          # the same code; a test that rebuilds the expected argv only proves
+          # its own copy right.
+          source "${GITHUB_WORKSPACE}/scripts/tag-args.sh"
+          COMPLETE="${{ steps.tags.outputs.complete }}"
+          mapfile -t TAG_NAMES < <(if [ "$COMPLETE" = "true" ]; then tag_names complete "${FP}"; else tag_names partial "${FP}"; fi)
 
           for v in $VARIANTS; do
             sfx="${v%%:*}"; tgt="${v#*:}"
@@ -561,7 +566,8 @@ jobs:
             if [ -n "$sfx" ]; then tag_sfx="-$sfx"; fi
             TARGET=()
             if [ -n "$tgt" ]; then TARGET=(--target "$tgt"); fi
-            echo "▸ variant '${sfx:-default}' → ${TAGS[*]/#--tag ghcr.io\/intarweb\/${IMAGE}:}${tag_sfx} target=${tgt:-<default>}"
+            read -ra T <<<"$(tag_args "ghcr.io/intarweb/${IMAGE}" "$tag_sfx" "${TAG_NAMES[@]}")"
+            echo "▸ variant '${sfx:-default}' → ${TAG_NAMES[*]%,}${tag_sfx} target=${tgt:-<default>}"
             docker buildx build \
               --file "$DF" \
               --platform "$PLATFORMS" \
@@ -569,7 +575,7 @@ jobs:
               --cache-from "$CACHE" \
               --cache-to "${CACHE},mode=max" \
               "${TARGET[@]}" "${BARG[@]}" "${LABELS[@]}" \
-              "${TAGS[@]/%/${tag_sfx}}" \
+              "${T[@]}" \
               --push "$CTX"
           done
 
