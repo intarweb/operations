@@ -533,6 +533,18 @@ jobs:
           # repo, which is what grants GITHUB_TOKEN write access to it. Required
           # where IMAGE_NAME != repo name (mcp-neo4j → neo4j-memory,
           # vllm → vllm-openai): those packages do not self-link.
+          # Completeness is decided once, before anything that reads it: the tag
+          # set and the image label are the same fact stated twice, and under
+          # `set -u` a label expanded before this assignment aborts the step.
+          COMPLETE="${{ steps.tags.outputs.complete }}"
+          if [ "$COMPLETE" = "true" ]; then
+            COMPLETE_LABEL=complete
+            TAG_NAMES=(latest "sha-${FP}")
+          else
+            COMPLETE_LABEL=partial
+            TAG_NAMES=("partial-sha-${FP}")
+          fi
+
           LABELS=(
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
             --label "org.opencontainers.image.revision=${HEAD_SHA}"
@@ -573,10 +585,6 @@ jobs:
             done
           }
           # tag-args:end
-          COMPLETE="${{ steps.tags.outputs.complete }}"
-          mapfile -t TAG_NAMES < <(if [ "$COMPLETE" = "true" ]; then tag_names complete "${FP}"; else tag_names partial "${FP}"; fi)
-          # Same fact the tag set encodes, stated on the image itself.
-          if [ "$COMPLETE" = "true" ]; then COMPLETE_LABEL=complete; else COMPLETE_LABEL=partial; fi
 
           for v in $VARIANTS; do
             sfx="${v%%:*}"; tgt="${v#*:}"

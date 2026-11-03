@@ -110,6 +110,70 @@ check "the tag constructor is inline in the workflow, not a separate file" yes \
 check "no tag-args script is expected to exist in a caller checkout" yes \
   "$([ -e "$HERE/tag-args.sh" ] && echo no || echo yes)"
 
+echo "lint: no variable is referenced before the step assigns it"
+# The execution rows catch this on the four paths they run; this catches it on
+# any path they do not. Order matters under `set -u`.
+ORDER="$("$HERE/extract-tag-args.sh" "$WF" >/dev/null 2>&1; awk '/Build \+ push every variant/,/^$/' "$WF" | grep -n 'COMPLETE_LABEL' || true)"
+FIRST_ASSIGN="$(grep -n 'COMPLETE_LABEL=' "$WF" | head -1 | cut -d: -f1)"
+FIRST_USE="$(grep -n 'COMPLETE_LABEL}' "$WF" | head -1 | cut -d: -f1)"
+check "COMPLETE_LABEL is assigned before it is expanded" yes \
+  "$([ -n "$FIRST_ASSIGN" ] && [ -n "$FIRST_USE" ] && [ "$FIRST_ASSIGN" -lt "$FIRST_USE" ] && echo yes || echo no)"
+
+echo "execute the build step: the block the runner runs, with docker stubbed"
+# Every defect this PR has had so far was invisible to a grep and visible to an
+# execution: a label read on an index, a suffix on the flags, a source from the
+# caller's tree, a variable used before it is assigned. Run the step's own text.
+TMPRUN="$(mktemp -d)"
+trap 'rm -rf "$TMPRUN"' EXIT
+
+run_step() { # run_step <complete> <variants> -> prints the stubbed docker argv
+  local out="$TMPRUN/out"
+  : > "$out"
+  bash scripts/extract-step.sh "$WF" "Build + push every variant" \
+       complete="$1" fp=abc123 head=deadbeef image=x \
+       repository=intarweb/x upstream=joeblack2k/x applied=br failed="" \
+       "variants=$2" > "$TMPRUN/step.sh"
+  (
+    set +e
+    export V_PLATFORMS=linux/amd64 V_REBUILD_EPOCH="" V_DOCKER_TARGET="" \
+           V_IMAGE_VARIANTS="" V_BUILD_ARGS="" VARIANTS="$2"
+    export FP=abc123 IMAGE=x HEAD_SHA=deadbeef UPSTREAM=joeblack2k/x APPLIED=br
+    export DF=Dockerfile CTX=. CACHE=type=registry
+    export OUT="$out"
+    # docker is stubbed: it records its argv and succeeds. OUTFILE is exported
+    # because an exported function does not see the caller's unexported
+    # variables under `set -u`.
+    export OUTFILE="$out"
+    docker() { printf 'docker %s\n' "$*" >> "$OUTFILE"; }
+    export -f docker
+    bash -euo pipefail "$TMPRUN/step.sh" >>"$OUTFILE" 2>&1
+    echo "RC=$?" >> "$OUTFILE"
+  )
+  cat "$out"
+}
+
+OUT_DEF="$(run_step true ':')"
+check "the build step runs to completion (default variant)" yes \
+  "$(printf '%s' "$OUT_DEF" | grep -qx 'RC=0' && echo yes || echo no)"
+check "a complete fold tags latest and sha at full argv" yes \
+  "$(printf '%s' "$OUT_DEF" | grep -qE -- '--tag ghcr.io/intarweb/x:latest --tag ghcr.io/intarweb/x:sha-abc123' && echo yes || echo no)"
+check "a complete fold labels the image complete" yes \
+  "$(printf '%s' "$OUT_DEF" | grep -q 'intarweb.fold=complete' && echo yes || echo no)"
+
+OUT_FULL="$(run_step true 'full:')"
+check "the build step runs to completion (suffixed variant)" yes \
+  "$(printf '%s' "$OUT_FULL" | grep -qx 'RC=0' && echo yes || echo no)"
+check "a suffixed variant keeps valid flags" yes \
+  "$(printf '%s' "$OUT_FULL" | grep -q -- '--tag ghcr.io/intarweb/x:latest-full' && ! printf '%s' "$OUT_FULL" | grep -q -- '--tag-' && echo yes || echo no)"
+
+OUT_PART="$(run_step false 'full:')"
+check "a partial fold still runs to completion" yes \
+  "$(printf '%s' "$OUT_PART" | grep -qx 'RC=0' && echo yes || echo no)"
+check "a partial fold tags only partial-sha" yes \
+  "$(printf '%s' "$OUT_PART" | grep -q -- '--tag ghcr.io/intarweb/x:partial-sha-abc123-full' && ! printf '%s' "$OUT_PART" | grep -qE -- '--tag ghcr.io/intarweb/x:(latest|sha-)' && echo yes || echo no)"
+check "a partial fold labels the image partial, never complete" yes \
+  "$(printf '%s' "$OUT_PART" | grep -q 'intarweb.fold=partial' && ! printf '%s' "$OUT_PART" | grep -q 'intarweb.fold=complete' && echo yes || echo no)"
+
 echo "label: the build stamps its own completeness, and it must tell the truth"
 # The label value is derived from COMPLETE in the workflow; assert the mapping
 # the workflow actually performs, not a copy of it.
