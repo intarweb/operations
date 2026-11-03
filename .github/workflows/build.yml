@@ -553,10 +553,26 @@ jobs:
           # per variant below. Expanding "${TAGS[@]/%/${tag_sfx}}" over the
           # argv would suffix the flags too, producing --tag-full, which buildx
           # rejects — every suffixed variant fails while the default passes.
-          # The tag construction lives in scripts/tag-args.sh so the test runs
-          # the same code; a test that rebuilds the expected argv only proves
-          # its own copy right.
-          source "${GITHUB_WORKSPACE}/scripts/tag-args.sh"
+          # tag-args:begin — the test extracts and executes this exact block.
+          # It is inlined, not sourced: this file is a reusable workflow, so the
+          # checkout in GITHUB_WORKSPACE is the CALLER's repo and carries no
+          # scripts/. Sourcing a path the caller does not have fails every
+          # publish at this step under set -e.
+          tag_names() { # tag_names <complete|partial> <fp>
+            case "$1" in
+              complete) printf '%s\n' latest "sha-$2" ;;
+              partial)  printf '%s\n' "partial-sha-$2" ;;
+              *) echo "tag_names: unknown completeness '$1'" >&2; return 2 ;;
+            esac
+          }
+          tag_args() { # tag_args <image> <suffix> <tag names...>
+            local image="$1" sfx="$2"; shift 2
+            local t
+            for t in "$@"; do
+              printf -- '--tag %s:%s%s ' "$image" "$t" "$sfx"
+            done
+          }
+          # tag-args:end
           COMPLETE="${{ steps.tags.outputs.complete }}"
           mapfile -t TAG_NAMES < <(if [ "$COMPLETE" = "true" ]; then tag_names complete "${FP}"; else tag_names partial "${FP}"; fi)
 

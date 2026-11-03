@@ -53,7 +53,11 @@ check "an empty map rebuilds" dirty \
   "$(printf '{}' > "$HERE/fixtures/.empty.json"; label_verdict "$HERE/fixtures/.empty.json")"
 rm -f "$HERE/fixtures/.empty.json"
 
-source "$HERE/tag-args.sh"
+# The workflow's own tag-args text, executed. Everything below that needs the
+# constructor uses this, so there is one definition in the whole suite.
+BLOCK="$("$HERE/extract-tag-args.sh" "$WF")"
+eval "$BLOCK"
+
 echo "publish gate: a rolled-back build cannot take :latest or :sha-<fp>"
 check "the tag decision exists and is keyed on the rollback list" yes \
   "$(grep -q "Decide the published tag set" "$WF" && grep -q 'steps.pick.outputs.failed' "$WF" && echo yes || echo no)"
@@ -68,10 +72,12 @@ check "no unconditional :latest tag survives in the push" yes \
 check "the run still goes red when a PR was rolled back" yes \
   "$(grep -q "Fail when the fold was incomplete" "$WF" && echo yes || echo no)"
 
-echo "variant rows: the real tag constructor, still a valid argv when suffixed"
-# Executes scripts/tag-args.sh — the same file the workflow sources. It must
-# never suffix the --tag flags: --tag-full is not a flag and buildx rejects it.
-source "$HERE/tag-args.sh"
+echo "variant rows: the constructor as the REAL workflow text, executed"
+# Extract the block the workflow itself runs, between its own markers, and
+# execute that. Not a copy and not a reimplementation: this is the text that
+# ships. A rendered expectation built here could only prove itself right.
+check "the workflow carries a marked tag-args block" yes \
+  "$(printf '%s' "$BLOCK" | grep -q 'tag_names()' && echo yes || echo no)"
 argv() { # argv <complete|partial> <suffix>
   local names
   mapfile -t names < <(tag_names "$1" abc123)
@@ -89,6 +95,20 @@ check "no suffixed argv contains a mangled flag" yes \
   "$(argv complete '-full' | grep -q -- '--tag-' && echo no || echo yes)"
 check "every element of a suffixed argv is --tag or a tag" yes \
   "$(argv complete '-full' | tr ' ' '\n' | grep -v '^$' | grep -qvE '^(--tag|ghcr\.io/)' && echo no || echo yes)"
+
+echo "caller context: this workflow is reusable, so it must not read the caller's tree"
+# workflow_call means GITHUB_WORKSPACE is the CALLER's checkout. Anything this
+# workflow sources from there exists when the test runs inside operations and
+# does not exist when a fork runs the workflow — the failure mode that makes a
+# locally-green test meaningless.
+check "the workflow sources nothing from GITHUB_WORKSPACE" yes \
+  "$(grep -q 'source .*GITHUB_WORKSPACE' "$WF" && echo no || echo yes)"
+check "the workflow sources nothing from its own scripts/ dir at run time" yes \
+  "$(grep -qE '^\s*source .*\$\{?(HERE|GITHUB_WORKSPACE)' "$WF" && echo no || echo yes)"
+check "the tag constructor is inline in the workflow, not a separate file" yes \
+  "$(grep -q 'tag_names()' "$WF" && echo yes || echo no)"
+check "no tag-args script is expected to exist in a caller checkout" yes \
+  "$([ -e "$HERE/tag-args.sh" ] && echo no || echo yes)"
 
 echo "label: the build stamps its own completeness"
 check "the push sets the fold label" yes \
