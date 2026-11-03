@@ -67,6 +67,28 @@ check "no unconditional :latest tag survives in the push" yes \
 check "the run still goes red when a PR was rolled back" yes \
   "$(grep -q "Fail when the fold was incomplete" "$WF" && echo yes || echo no)"
 
+echo "variant rows: a partial build never emits a good tag, at any suffix"
+# Mirror the workflow's own expression: TAGS entries get the variant suffix appended.
+tags_for() { # tags_for <complete|partial> <variant suffix, empty for default>
+  local t=()
+  if [ "$1" = complete ]; then
+    t=(":latest" ":sha-abc123")
+  else
+    t=(":partial-sha-abc123")
+  fi
+  printf '%s\n' "${t[@]/%/$2}"
+}
+check "complete, default variant: latest + sha" ":latest :sha-abc123" \
+  "$(tags_for complete '' | tr '\n' ' ' | sed 's/ $//')"
+check "complete, named variant: suffixed latest + sha" ":latest-foo :sha-abc123-foo" \
+  "$(tags_for complete '-foo' | tr '\n' ' ' | sed 's/ $//')"
+check "partial, default variant: partial only" ":partial-sha-abc123" \
+  "$(tags_for partial '' | tr '\n' ' ' | sed 's/ $//')"
+check "partial, named variant: partial only, suffixed" ":partial-sha-abc123-foo" \
+  "$(tags_for partial '-foo' | tr '\n' ' ' | sed 's/ $//')"
+check "a partial tag set contains no latest and no plain sha tag" yes \
+  "$(tags_for partial '-foo' | grep -qE ':latest|:sha-' && echo no || echo yes)"
+
 echo "label: the build stamps its own completeness"
 check "the push sets the fold label" yes \
   "$(grep -q 'net.siliconspirit.intarweb.fold=complete' "$WF" && echo yes || echo no)"
