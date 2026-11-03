@@ -338,9 +338,30 @@ jobs:
             IMG="ghcr.io/intarweb/${IMAGE}:sha-${FP}${sfx}"
             docker buildx imagetools inspect "$IMG" >/dev/null 2>&1 || MISSING="$MISSING $IMG"
           done
+          # A present tag is not enough, for two reasons. Images published
+          # before the tag-set split carry `:sha-<fp>` from a rolled-back build;
+          # and any image can be pushed by a run whose fold was short. The label
+          # says the fold completed, so require it. Absent or non-"complete"
+          # label on any platform ⇒ rebuild.
+          CLEAN=""
+          if [ -z "$MISSING" ]; then
+            # `{{ json .Image }}` is a map keyed by platform on a multi-arch
+            # push, so the label must be checked on EVERY platform, with a
+            # missing label counting as not-clean. Deduplicating the values
+            # first would hide a platform that carries no label at all.
+            if docker buildx imagetools inspect "ghcr.io/intarweb/${IMAGE}:sha-${FP}" \
+                 --format '{{ json .Image }}' 2>/dev/null \
+               | jq -e 'to_entries
+                        | map(.value.config.Labels["net.siliconspirit.intarweb.fold"] // "MISSING")
+                        | length > 0 and all(. == "complete")' >/dev/null; then
+              CLEAN="yes"
+            else
+              MISSING="$MISSING (${IMAGE}:sha-${FP} present but fold not complete on every platform)"
+            fi
+          fi
           if [ -z "$MISSING" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "  no-op (all variant tags present)"
+            echo "  no-op (all variant tags present, fold complete)"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "  building (absent:$MISSING)"
@@ -447,6 +468,28 @@ jobs:
           echo "df=$DF" >> "$GITHUB_OUTPUT"
           echo "ctx=$CTX" >> "$GITHUB_OUTPUT"
 
+      # F3 (fail-closed) — BEFORE the build, not after it. A rolled-back PR means
+      # the tree is not the tree the tags claim, so the image must not be pushed
+      # at all. Running this last published a partial image under `:latest` and
+      # then exited red: the run was honest, the tag was not.
+      # A rolled-back tree is still built and pushed, so the failure can be
+      # inspected — but only under :partial-sha-<fp>. It never takes :latest or
+      # :sha-<fp>, so the presence of those two IS the proof the fold was
+      # complete. The label below is a second check, not the mechanism: a
+      # multi-arch push is an OCI index with no top-level config to read.
+      - name: 🚦 Decide the published tag set
+        id: tags
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false'
+        run: |
+          if [ -n "${{ steps.pick.outputs.failed }}" ]; then
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — publishing only :partial-sha-\${FP}; rebase and re-run"
+          else
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          FP: ${{ steps.fp.outputs.fp }}
+
       - name: 🐳 Set up Buildx
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.df.outputs.skip == 'false'
         uses: docker/setup-buildx-action@v3
@@ -490,12 +533,58 @@ jobs:
           # repo, which is what grants GITHUB_TOKEN write access to it. Required
           # where IMAGE_NAME != repo name (mcp-neo4j → neo4j-memory,
           # vllm → vllm-openai): those packages do not self-link.
+          # Completeness is decided once, before anything that reads it: the tag
+          # set and the image label are the same fact stated twice, and under
+          # `set -u` a label expanded before this assignment aborts the step.
+          COMPLETE="${{ steps.tags.outputs.complete }}"
+          if [ "$COMPLETE" = "true" ]; then
+            COMPLETE_LABEL=complete
+            TAG_NAMES=(latest "sha-${FP}")
+          else
+            COMPLETE_LABEL=partial
+            TAG_NAMES=("partial-sha-${FP}")
+          fi
+
           LABELS=(
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
             --label "org.opencontainers.image.revision=${HEAD_SHA}"
             --label "org.opencontainers.image.version=sha-${FP}"
             --label "org.opencontainers.image.description=upstream ${UPSTREAM} + intarweb PRs [${APPLIED}]"
+            # Fold completeness travels WITH the image, and must match what was
+            # actually published: a rolled-back tree goes to :partial-sha-<fp>
+            # and says "partial". The no-op check reads this label, so an
+            # already-published image short-circuits the build only if the run
+            # that published it rolled nothing back.
+            --label "net.siliconspirit.intarweb.fold=${COMPLETE_LABEL}"
           )
+
+          # A complete fold publishes :latest + :sha-<fp>; a rolled-back one
+          # publishes ONLY :partial-sha-<fp>, so `:sha-<fp>` existing is itself
+          # the proof the fold was complete. One mechanism, no index parsing.
+          # Tag NAMES only; the --tag flags and the variant suffix are applied
+          # per variant below. Expanding "${TAGS[@]/%/${tag_sfx}}" over the
+          # argv would suffix the flags too, producing --tag-full, which buildx
+          # rejects — every suffixed variant fails while the default passes.
+          # tag-args:begin — the test extracts and executes this exact block.
+          # It is inlined, not sourced: this file is a reusable workflow, so the
+          # checkout in GITHUB_WORKSPACE is the CALLER's repo and carries no
+          # scripts/. Sourcing a path the caller does not have fails every
+          # publish at this step under set -e.
+          tag_names() { # tag_names <complete|partial> <fp>
+            case "$1" in
+              complete) printf '%s\n' latest "sha-$2" ;;
+              partial)  printf '%s\n' "partial-sha-$2" ;;
+              *) echo "tag_names: unknown completeness '$1'" >&2; return 2 ;;
+            esac
+          }
+          tag_args() { # tag_args <image> <suffix> <tag names...>
+            local image="$1" sfx="$2"; shift 2
+            local t
+            for t in "$@"; do
+              printf -- '--tag %s:%s%s ' "$image" "$t" "$sfx"
+            done
+          }
+          # tag-args:end
 
           for v in $VARIANTS; do
             sfx="${v%%:*}"; tgt="${v#*:}"
@@ -503,7 +592,8 @@ jobs:
             if [ -n "$sfx" ]; then tag_sfx="-$sfx"; fi
             TARGET=()
             if [ -n "$tgt" ]; then TARGET=(--target "$tgt"); fi
-            echo "▸ variant '${sfx:-default}' → :latest${tag_sfx} :sha-${FP}${tag_sfx} target=${tgt:-<default>}"
+            read -ra T <<<"$(tag_args "ghcr.io/intarweb/${IMAGE}" "$tag_sfx" "${TAG_NAMES[@]}")"
+            echo "▸ variant '${sfx:-default}' → ${TAG_NAMES[*]%,}${tag_sfx} target=${tgt:-<default>}"
             docker buildx build \
               --file "$DF" \
               --platform "$PLATFORMS" \
@@ -511,16 +601,15 @@ jobs:
               --cache-from "$CACHE" \
               --cache-to "${CACHE},mode=max" \
               "${TARGET[@]}" "${BARG[@]}" "${LABELS[@]}" \
-              --tag "ghcr.io/intarweb/${IMAGE}:latest${tag_sfx}" \
-              --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}${tag_sfx}" \
+              "${T[@]}" \
               --push "$CTX"
           done
 
-      # F3 (fail-closed) — LAST step on purpose: the image is already pushed with
-      # honest labels listing exactly what applied, and the run still goes red so
-      # the rolled-back PR gets rebased instead of quietly rotting.
-      - name: ❌ Fail if any PR was rolled back
-        if: always() && steps.pick.outputs.failed != ''
+      # The tag set already records completeness, so this is the run's verdict,
+      # not its mechanism: a partial build is pushed under :partial-sha-<fp> for
+      # inspection and the run still goes red until the PR is rebased.
+      - name: ❌ Fail when the fold was incomplete
+        if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.pick.outputs.failed != ''
         run: |
-          echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — image published WITHOUT them; rebase and re-run"
+          echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — published as :partial-sha-${{ steps.fp.outputs.fp }}, not :latest/:sha; rebase and re-run"
           exit 1
