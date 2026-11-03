@@ -346,11 +346,9 @@ jobs:
           CLEAN=""
           if [ -z "$MISSING" ]; then
             LABEL="$(docker buildx imagetools inspect "ghcr.io/intarweb/${IMAGE}:sha-${FP}" \
-              --format '{{ json .Image }}' 2>/dev/null \
-              | grep -o 'net.siliconspirit.intarweb.fold[^,}]*' | head -1 || true)"
-            case "$LABEL" in
-              *complete*) CLEAN="yes" ;;
-            esac
+              --format '{{ index .Image.config.Labels "net.siliconspirit.intarweb.fold" }}' 2>/dev/null || true)"
+            # Exact match, not a substring: "incomplete" must not read as clean.
+            [ "$LABEL" = "complete" ] && CLEAN="yes"
             [ -z "$CLEAN" ] && MISSING="$MISSING (${IMAGE}:sha-${FP} present but not marked complete)"
           fi
           if [ -z "$MISSING" ]; then
