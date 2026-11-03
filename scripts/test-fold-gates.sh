@@ -26,36 +26,46 @@ check() { # check <description> <expected> <actual>
 }
 
 # The label probe, extracted so the test exercises the real expression.
-label_verdict() { # label_verdict <the label value imagetools prints>
-  # Exact match: "incomplete" and "complete-ish" are not clean.
-  [ "$1" = "complete" ] && echo clean || echo dirty
+# The exact predicate the workflow runs, over fixtures shaped like a real
+# `imagetools inspect --format '{{ json .Image }}'` on a multi-arch index:
+# a map keyed by platform, each with its own config.Labels.
+label_verdict() { # label_verdict <file>
+  if jq -e 'to_entries
+            | map(.value.config.Labels["net.siliconspirit.intarweb.fold"] // "MISSING")
+            | length > 0 and all(. == "complete")' "$1" >/dev/null 2>&1; then
+    echo clean
+  else
+    echo dirty
+  fi
 }
 
 echo "no-op gate: a present tag is not a finished image"
-check "an image carrying the fold label short-circuits the build" clean \
-  "$(label_verdict 'complete')"
-check "an image without the label rebuilds" dirty "$(label_verdict '')"
-check "an image marked partial rebuilds" dirty "$(label_verdict 'partial')"
-check "an image marked incomplete rebuilds (not a substring match)" dirty \
-  "$(label_verdict 'incomplete')"
-check "a near-miss value rebuilds" dirty "$(label_verdict 'complete-ish')"
+check "every platform marked complete short-circuits the build" clean \
+  "$(label_verdict "$HERE/fixtures/index-complete.json")"
+check "one platform missing the label rebuilds" dirty \
+  "$(label_verdict "$HERE/fixtures/index-one-missing.json")"
+check "a platform marked incomplete rebuilds" dirty \
+  "$(label_verdict "$HERE/fixtures/index-incomplete.json")"
+check "no platform carrying the label rebuilds" dirty \
+  "$(label_verdict "$HERE/fixtures/index-absent.json")"
+check "unreadable output rebuilds" dirty "$(label_verdict /nonexistent.json)"
+check "an empty map rebuilds" dirty \
+  "$(printf '{}' > "$HERE/fixtures/.empty.json"; label_verdict "$HERE/fixtures/.empty.json")"
+rm -f "$HERE/fixtures/.empty.json"
 
-echo "publish gate: order of the steps in the workflow"
-step_index() { # step_index <name substring>
-  grep -n "name: .*$1" "$WF" | head -1 | cut -d: -f1
-}
-STOP="$(step_index 'Stop before publishing if any PR was rolled back')"
-BUILD="$(step_index 'Build + push every variant')"
-ASSEMBLE="$(step_index 'Assemble (cherry-pick open PRs')"
-
-check "the rollback stop exists" yes "$([ -n "$STOP" ] && echo yes || echo no)"
-check "it runs after the fold" yes \
-  "$([ "${STOP:-0}" -gt "${ASSEMBLE:-999999}" ] && echo yes || echo no)"
-check "and before anything is pushed" yes \
-  "$([ "${STOP:-999999}" -lt "${BUILD:-0}" ] && echo yes || echo no)"
-check "the build step is gated on no rollback" yes \
-  "$(grep -A1 "name: 📦 Build + push every variant" "$WF" \
-      | grep -q "steps.pick.outputs.failed == ''" && echo yes || echo no)"
+echo "publish gate: a rolled-back build cannot take :latest or :sha-<fp>"
+check "the tag decision exists and is keyed on the rollback list" yes \
+  "$(grep -q "Decide the published tag set" "$WF" && grep -q 'steps.pick.outputs.failed' "$WF" && echo yes || echo no)"
+check "a complete fold publishes :latest and :sha-<fp>" yes \
+  "$(grep -q 'TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:latest" --tag "ghcr.io/intarweb/${IMAGE}:sha-${FP}")' "$WF" && echo yes || echo no)"
+check "a rolled-back fold publishes :partial-sha-<fp> only" yes \
+  "$(grep -q 'TAGS=(--tag "ghcr.io/intarweb/${IMAGE}:partial-sha-${FP}")' "$WF" && echo yes || echo no)"
+check "the push uses the decided tag set" yes \
+  "$(grep -qF 'TAGS[@]/%/' "$WF" && echo yes || echo no)"
+check "no unconditional :latest tag survives in the push" yes \
+  "$(grep -qF -- '--tag "ghcr.io/intarweb/${IMAGE}:latest${tag_sfx}"' "$WF" && echo no || echo yes)"
+check "the run still goes red when a PR was rolled back" yes \
+  "$(grep -q "Fail when the fold was incomplete" "$WF" && echo yes || echo no)"
 
 echo "label: the build stamps its own completeness"
 check "the push sets the fold label" yes \
