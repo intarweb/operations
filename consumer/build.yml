@@ -6,8 +6,9 @@
 #
 #   FORK:       main is synced to the upstream default branch; every open
 #               intarweb→upstream PR is folded into the built image. Rebuilds
-#               when our PRs update, a PR is opened against the fork, or
-#               upstream moves (see schedule).
+#               hourly when a PR is opened, a PR branch moves, or upstream
+#               moves (see schedule). A PR against the fork itself is NOT
+#               folded — upstream is the only transport.
 #   GREENFIELD: every push to the default branch builds :latest.
 # Shared logic: intarweb/operations/.github/workflows/build.yml (public repo —
 # reusable workflows resolve + unlimited Actions minutes).
@@ -15,17 +16,20 @@
 name: build
 
 on:
-  push:                    # any branch push — a push to a branch that heads an
-                           # upstream PR fires instantly when build.yml is seeded
-                           # on it (GH uses the branch's own workflow file).
+  push:                    # any branch push — but only fires where THIS FILE
+                           # is on the branch. The mirror prunes it from main
+                           # except on main, so a branch cut after the prune
+                           # carries nothing and cannot self-fold; see the
+                           # schedule below, which is the safety net.
   pull_request:            # PRs opened AGAINST the fork (fork-internal PRs)
   schedule:
-    # Low-cadence re-sync only (no poll). GitHub fires NO event on the fork
-    # when an intarweb->upstream PR is opened, so this is what keeps the fork
-    # main mirrored to upstream, re-arms the seed onto PR branches that a
-    # rebase dropped it from, and folds newly-opened PRs. The instant path is
-    # `push` above.
-    - cron: '4 4 * * *'    # daily upstream re-sync + seed re-arm + fold (~4 AM local)
+    # The fold's only reliable trigger. There is no seed step (removed in F1):
+    # nothing ever writes build.yml onto a PR branch, so a push to one of those
+    # branches starts no fold — whatever other workflows upstream left on the
+    # branch may run, this one does not. GitHub also fires NO event on the fork
+    # when an intarweb->upstream PR is opened. This cadence is therefore what
+    # picks up every new or updated PR, not just a re-sync.
+    - cron: '4 * * * *'    # hourly re-sync + fold (no-op when the fingerprint is unchanged)
   workflow_dispatch:
 
 permissions:
