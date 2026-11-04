@@ -162,8 +162,9 @@ jobs:
           # 3b. GitHub caches a workflow's registered `on:` triggers and only
           # re-reads them when the file is deleted + re-added (a content edit or
           # overlay push is NOT a re-registration). Force it: delete then re-add
-          # the file via the API so every sync re-registers the canonical
-          # triggers (push, pull_request, */15 schedule) on the fork.
+          # the file via the API so every sync re-registers whatever triggers
+          # the consumer file declares — read them there, not from this comment,
+          # which has outlived two cadence changes already.
           # Re-registration MUST use the minted App token (workflows scope);
           # GITHUB_TOKEN has no `workflows` scope, so those API calls 403 and the
           # re-registration silently no-ops. Subshell-scope the token so gh uses

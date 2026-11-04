@@ -25,7 +25,8 @@ on:
   schedule:
     # The fold's only reliable trigger. There is no seed step (removed in F1):
     # nothing ever writes build.yml onto a PR branch, so a push to one of those
-    # branches runs no workflow at all. GitHub also fires NO event on the fork
+    # branches starts no fold — whatever other workflows upstream left on the
+    # branch may run, this one does not. GitHub also fires NO event on the fork
     # when an intarweb->upstream PR is opened. This cadence is therefore what
     # picks up every new or updated PR, not just a re-sync.
     - cron: '4 * * * *'    # hourly re-sync + fold (no-op when the fingerprint is unchanged)
