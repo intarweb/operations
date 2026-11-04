@@ -670,3 +670,70 @@ jobs:
         run: |
           echo "::error::rolled back: ${{ steps.pick.outputs.failed }} — published as :partial-sha-${{ steps.fp.outputs.fp }}, not :latest/:sha; rebase and re-run"
           exit 1
+
+      # A repo whose binaries are built by its own release workflow needs a tag
+      # on the tree the fold verified, not on the mirror's main — main holds
+      # upstream's code, so a tag there builds the wrong thing. Opted in per repo
+      # (FOLD_TAG_RELEASES), because an image repo wants no tags at all.
+      #
+      # Gated on the same condition as the publish: a rolled-back fold tags
+      # nothing. Gated on a Dockerfile-less tree being the norm, because such a
+      # repo skips the image build entirely and "the image built" cannot be the
+      # proof here.
+      #
+      # The push uses the minted App token: a GITHUB_TOKEN push does not trigger
+      # workflows, so the release workflow the tag exists to fire would never run.
+      - name: 🏷️ Tag the folded tree for the repo's release workflow
+        id: tagfold
+        if: >-
+          steps.cls.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+          && vars.FOLD_TAG_RELEASES == 'true'
+          && steps.pick.outputs.failed == ''
+        env:
+          TOK: ${{ steps.tok.outputs.token }}
+          FP: ${{ steps.fp.outputs.fp }}
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+          if [ ! -f .github/workflows/release.yml ]; then
+            echo "::warning::FOLD_TAG_RELEASES is set but the folded tree carries no release.yml — nothing to tag for"
+            exit 0
+          fi
+          # The version upstream itself releases under, at the commit we folded.
+          # Generic across repos; the per-repo Cargo.toml is not. No tag reachable
+          # is not a version to guess at.
+          #
+          # Only a plain upstream release tag names a version. Every tag carrying
+          # a '-' is a variant of one: our own v<ver>-fold.<fp>, a fork's
+          # v<ver>-fork.N, an rc. --sort=-v:refname ranks v0.4.16-fork.54 ABOVE
+          # v0.4.16, so the skip is what keeps a variant out of the base — and a
+          # fold tag left in would name each fold after the last fold
+          # (v0.4.16-fold.<fp>-fold.<fp>) for a repo with no upstream release.
+          ver=""
+          while IFS= read -r t; do
+            case "$t" in *-*) continue;; esac
+            ver="$t"; break
+          done < <(git tag --merged "$UPSTREAM_SHA" --list 'v*' --sort=-v:refname 2>/dev/null)
+          if [ -n "$ver" ]; then ver="${ver#v}"; else ver="0.0.0-$(printf '%s' "$UPSTREAM_SHA" | cut -c1-12)"; fi
+          TAG="v${ver}-fold.${FP}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "  tag $TAG on the assembled tree $(git rev-parse --short HEAD)"
+
+          tree="$(git rev-parse HEAD^{tree})"
+          remote="$(git ls-remote --tags origin "refs/tags/$TAG" | head -1 | cut -f1 || true)"
+          if [ -n "$remote" ]; then
+            # A re-run cherry-picks the same content into new commits, so compare
+            # TREES, not commits — otherwise every re-run reads as a finding.
+            git fetch --quiet --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+            old="$(git rev-parse "refs/tags/$TAG^{tree}" 2>/dev/null || true)"
+            if [ "$old" = "$tree" ]; then echo "  already tagged at this tree — no-op"; exit 0; fi
+            echo "::error::tag $TAG exists on a DIFFERENT tree (remote ${old:-unknown}, this $tree) — the same fingerprint must not name two trees; investigate the fingerprint inputs"
+            exit 1
+          fi
+          git -c user.name=intarweb-ci -c user.email=ci@intarweb.invalid \
+            tag -a "$TAG" -m "fold of ${FP} on upstream ${UPSTREAM_SHA}; verified by the fold run, $(git rev-parse --short HEAD)"
+          AUTH="$(printf 'x-access-token:%s' "$TOK" | base64 | tr -d '\n')"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" push \
+            "https://github.com/${{ github.repository }}.git" "refs/tags/$TAG" || {
+              echo "::error::tag push failed — the release workflow will not fire"; exit 1; }
+          echo "  pushed $TAG — the release workflow builds from this tree"
