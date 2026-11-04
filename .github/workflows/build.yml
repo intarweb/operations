@@ -703,13 +703,15 @@ jobs:
           # Generic across repos; the per-repo Cargo.toml is not. No tag reachable
           # is not a version to guess at.
           #
-          # Exclude our own fold tags: they match 'v*' too, so without this a repo
-          # whose upstream has no version tag would name each fold after the last
-          # fold it made — v0.4.16-fold.<fp>-fold.<fp>. Only tags without '-fold.'
-          # are upstream's.
+          # Only a plain upstream release tag names a version. Every tag carrying
+          # a '-' is a variant of one: our own v<ver>-fold.<fp>, a fork's
+          # v<ver>-fork.N, an rc. --sort=-v:refname ranks v0.4.16-fork.54 ABOVE
+          # v0.4.16, so the skip is what keeps a variant out of the base — and a
+          # fold tag left in would name each fold after the last fold
+          # (v0.4.16-fold.<fp>-fold.<fp>) for a repo with no upstream release.
           ver=""
           while IFS= read -r t; do
-            case "$t" in *-fold.*) continue;; esac
+            case "$t" in *-*) continue;; esac
             ver="$t"; break
           done < <(git tag --merged "$UPSTREAM_SHA" --list 'v*' --sort=-v:refname 2>/dev/null)
           if [ -n "$ver" ]; then ver="${ver#v}"; else ver="0.0.0-$(printf '%s' "$UPSTREAM_SHA" | cut -c1-12)"; fi
