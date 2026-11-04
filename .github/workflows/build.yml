@@ -281,10 +281,38 @@ jobs:
               --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')" \
               || { echo "::error::could not list open PRs on ${{ steps.cls.outputs.upstream }}"; exit 1; }
             mapfile -t BRANCHES <<<"$OPEN_PRS"
+            # Parents first. gh lists newest PRs first, so a PR stacked on another
+            # (opened after it) would be picked before its parent. Fetch every
+            # branch, then order them so a branch whose tip is an ancestor of
+            # another's comes first; unrelated branches keep the oldest-first order.
+            FETCHED=()
+            for b in "${BRANCHES[@]:-}"; do
+              [ -z "$b" ] && continue
+              git fetch --quiet origin "$b:pr/$b" && FETCHED=("$b" "${FETCHED[@]}")
+            done
+            ORDERED=()
+            REMAINING=("${FETCHED[@]}")
+            while [ ${#REMAINING[@]} -gt 0 ]; do
+              NEXT=()
+              for b in "${REMAINING[@]}"; do
+                blocked=false
+                for o in "${REMAINING[@]}"; do
+                  [ "$o" = "$b" ] && continue
+                  if git merge-base --is-ancestor "pr/$o" "pr/$b" && ! git merge-base --is-ancestor "pr/$b" "pr/$o"; then
+                    blocked=true; break
+                  fi
+                done
+                if [ "$blocked" = "true" ]; then NEXT+=("$b"); else ORDERED+=("$b"); fi
+              done
+              # A cycle cannot happen between distinct tips, but never loop forever.
+              [ ${#NEXT[@]} -eq ${#REMAINING[@]} ] && { ORDERED+=("${NEXT[@]}"); break; }
+              REMAINING=("${NEXT[@]:-}")
+              [ -z "${REMAINING[0]:-}" ] && REMAINING=()
+            done
+            BRANCHES=("${ORDERED[@]:-}")
             PR_SHAS=""
             for b in "${BRANCHES[@]:-}"; do
               [ -z "$b" ] && continue
-              git fetch --quiet origin "$b:pr/$b" || continue
               PR_SHAS="$PR_SHAS $(git rev-parse "pr/$b")"
               echo "  PR branch $b -> $(git rev-parse "pr/$b")"
             done
@@ -377,7 +405,14 @@ jobs:
           git config user.email ci@intarweb.invalid
           APPLIED=""
           FAILED=""
+          # Patch-ids of every change already on the build tree. A stacked PR's range
+          # (HEAD..pr/<child>) still lists its parent's commits, because the parent was
+          # picked as new SHAs; re-applying them conflicts with whatever a later PR
+          # changed on the same lines. A commit whose patch-id is already here is the
+          # same change, so it is skipped rather than re-applied.
+          HAVE=" "
           for b in ${{ steps.fp.outputs.branches }}; do
+            HAVE_AT_BASE="$HAVE"
             # F2 — rollback point. A PR lands WHOLE or not at all. Without this,
             # a PR that conflicts halfway leaves its earlier commits on the tree
             # while the fingerprint claims the full PR: the tag lies about its
@@ -392,11 +427,17 @@ jobs:
             echo "  cherry-pick ${#COMMITS[@]} commits (linearized) from pr/$b"
             OK=true
             for c in "${COMMITS[@]}"; do
+              PID="$(git show "$c" | git patch-id --stable | cut -d' ' -f1)"
+              case "$HAVE" in *" $PID "*)
+                echo "    same change already on the tree, skipped $(echo "$c" | cut -c1-7)"
+                continue;;
+              esac
               # F3 — no -X theirs. It silently resolved every upstream-vs-PR
               # conflict in the PR's favour, so a file upstream rewrote got
               # clobbered by a stale PR version and still built green. Fail closed.
               # The old add/add build.yml handler is gone with the seed step (F1).
               if git cherry-pick "$c" 2>/tmp/cp.err; then
+                HAVE="$HAVE$PID "
                 echo "    applied $(echo "$c" | cut -c1-7)"
                 continue
               fi
@@ -410,6 +451,7 @@ jobs:
               # cherry-pick in progress with no conflicted paths is the empty case.
               if [ -f .git/CHERRY_PICK_HEAD ] && [ -z "$(git diff --name-only --diff-filter=U)" ]; then
                 git cherry-pick --skip >/dev/null 2>&1 || git cherry-pick --abort >/dev/null 2>&1 || true
+                HAVE="$HAVE$PID "
                 echo "    already on the tree, skipped $(echo "$c" | cut -c1-7)"
                 continue
               fi
@@ -423,6 +465,7 @@ jobs:
               APPLIED="$APPLIED,$b"
             else
               git reset --hard "$BASE"
+              HAVE="$HAVE_AT_BASE"
               FAILED="$FAILED,$b"
               echo "  rolled back $b to $(echo "$BASE" | cut -c1-7)"
             fi
