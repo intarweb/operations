@@ -122,6 +122,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TOK: ${{ steps.tok.outputs.token }}
+          FORK_KEEP_WORKFLOWS: ${{ vars.FORK_KEEP_WORKFLOWS }}
         run: |
           set -euo pipefail
           UPSTREAM_URL="https://github.com/${{ steps.cls.outputs.upstream }}.git"
@@ -151,7 +152,19 @@ jobs:
           # prune any OTHER workflow the mirror carried in from upstream (and our
           # own retired legacy ones) so upstream's CI never fires on the fork →
           # build-failure email noise. build.yml is the sole workflow by law.
-          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) ! -name 'build.yml' -delete
+          #
+          # FORK_KEEP_WORKFLOWS (repo variable, space-separated) exempts a workflow
+          # the fork itself needs. Without it, a fork whose binaries are built by
+          # its own release workflow loses that workflow on every sync: the trigger
+          # still exists as a GitHub registration, the file does not, so a tag fired
+          # on the mirror builds nothing. Name the file, not a glob table.
+          KEEP=" ${FORK_KEEP_WORKFLOWS:-} "
+          find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -print | while IFS= read -r f; do
+            base="$(basename "$f")"
+            [ "$base" = "build.yml" ] && continue
+            case "$KEEP" in *" $base "*) echo "  keeping $base (FORK_KEEP_WORKFLOWS)"; continue;; esac
+            rm -f "$f"
+          done
           git add -A .github/workflows
           # [skip ci] is REQUIRED: the App token (a GitHub App) can never modify
           # .github/workflows (no `workflows` perm on GITHUB_TOKEN; the minted App
