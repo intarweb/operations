@@ -147,6 +147,33 @@ jobs:
             echo "::warning::could not fetch canonical consumer (network); reusing in-tree overlay"
             cp .github/workflows/build.yml /tmp/consumer-build.yml 2>/dev/null || true
           fi
+          # 3a. Per-repo schedule offset. The canonical consumer carries the
+          # literal '__MINUTE__' where its cron minute belongs: the file is
+          # byte-identical in every fork by construction, so a repo cannot hold
+          # its own minute, and GitHub reads `on.schedule` from this file only —
+          # it cannot interpolate an expression. Substitute here, before the file
+          # is written to the tree and re-added via the API, so both write paths
+          # carry the same bytes.
+          #
+          # Why: every tick boots a runner whatever the fingerprint says, and the
+          # pool is large; GitHub throttles a fork for cumulative usage ("Workflows
+          # are not currently being run on this fork due to the scale of GitHub
+          # Actions usage"). A per-repo minute spreads 23+ forks across the hour
+          # so they do not all wake together.
+          #
+          # Derived from the repo name only — never from the default branch, which
+          # differs across the pool (docker-autoheal mirrors `master`). The value
+          # is expanded from the environment, not into the perl expression, so a
+          # name containing '&' or '\\' cannot reach the substitution.
+          if grep -q "__MINUTE__" /tmp/consumer-build.yml; then
+            export MIN="$(( $(printf '%s' "${{ github.event.repository.name }}" | cksum | cut -d' ' -f1) % 60 ))"
+            perl -pi -e 's/__MINUTE__/$ENV{MIN}/g' /tmp/consumer-build.yml
+            if grep -q "__MINUTE__" /tmp/consumer-build.yml; then
+              echo "::error::offset substitution left __MINUTE__ in the consumer; refusing to install an invalid schedule"
+              exit 1
+            fi
+            echo "  schedule minute=$MIN (6-hourly, derived from repo name)"
+          fi
           mkdir -p .github/workflows
           cp /tmp/consumer-build.yml .github/workflows/build.yml
           # prune any OTHER workflow the mirror carried in from upstream (and our
