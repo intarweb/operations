@@ -6,7 +6,7 @@
 #
 #   FORK:       main is synced to the upstream default branch; every open
 #               intarweb→upstream PR is folded into the built image. Rebuilds
-#               hourly when a PR is opened, a PR branch moves, or upstream
+#               six-hourly when a PR is opened, a PR branch moves, or upstream
 #               moves (see schedule). A PR against the fork itself is NOT
 #               folded — upstream is the only transport.
 #   GREENFIELD: every push to the default branch builds :latest.
@@ -23,13 +23,26 @@ on:
                            # schedule below, which is the safety net.
   pull_request:            # PRs opened AGAINST the fork (fork-internal PRs)
   schedule:
-    # The fold's only reliable trigger. There is no seed step (removed in F1):
-    # nothing ever writes build.yml onto a PR branch, so a push to one of those
-    # branches starts no fold — whatever other workflows upstream left on the
-    # branch may run, this one does not. GitHub also fires NO event on the fork
-    # when an intarweb->upstream PR is opened. This cadence is therefore what
-    # picks up every new or updated PR, not just a re-sync.
-    - cron: '4 * * * *'    # hourly re-sync + fold (no-op when the fingerprint is unchanged)
+    # The fold's backstop, not its main trigger. There is no seed step (removed
+    # in F1): nothing writes build.yml onto a PR branch, so a push to one of
+    # those branches starts no fold here — and GitHub fires NO event on the fork
+    # when an intarweb->upstream PR is opened. So this is what picks up a new or
+    # updated PR that no push hook dispatched.
+    #
+    # COST — why the interval and the offset: every tick boots a runner that
+    # checks out full history, syncs, fingerprints and usually finds nothing to
+    # do, whether or not the fingerprint moved. Multiplied by the pool that is
+    # what GitHub counts, and it throttled a fork for it ("Workflows are not
+    # currently being run on this fork due to the scale of GitHub Actions
+    # usage"). Six-hourly with a per-repo minute offset keeps 23 forks off the
+    # same minute. The pre-push dispatch hook is what catches a push within
+    # seconds; this cadence is the floor under everything else.
+    #
+    # The minute is a placeholder. The sync step in
+    # .github/workflows/build.yml rewrites it per repo at sync time — this file
+    # is byte-identical in every fork by construction, so a repo cannot carry
+    # its own literal here.
+    - cron: '__MINUTE__ */6 * * *'   # 6-hourly re-sync + fold, per-repo minute
   workflow_dispatch:
 
 permissions:

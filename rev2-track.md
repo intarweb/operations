@@ -40,6 +40,43 @@
 
 ## Log
 
+### W8 (2026-11-09) — the schedule's cost, and why it now runs 6-hourly
+- **What happened:** GitHub stopped running workflows on `intarweb/mcp-gateway`
+  with *"Workflows are not currently being run on this fork due to the scale of
+  GitHub Actions usage"*. Nothing was disabled by a bot or a person, and no API
+  switch cleared it (repo permissions toggle, workflow enable, dispatch, rerun —
+  the rerun was accepted and then sat `queued` with zero jobs allocated).
+- **Cause, measured:** the fingerprint no-op gate was already doing its job —
+  one overlay commit in the fork's last 100 commits, 93 runs in total since
+  August. What it was not doing is saving the run itself: **every** tick boots a
+  runner, checks out full history, syncs, and only then discovers the
+  fingerprint has not moved. The consumer's `cron: '4 * * * *'` across **23
+  forks** is 23 hourly runners, nearly all of them no-ops. That aggregate is
+  what the throttle counts.
+- **Change:** the consumer's schedule moves to `*/6` (six-hourly) with a
+  **per-repo minute** derived from the repo name. The minute cannot live in
+  `consumer/build.yml` — that file is byte-identical in every fork by
+  construction, and GitHub reads `on.schedule` from the file only (no
+  expressions). So the consumer carries a `__MINUTE__` placeholder and the sync
+  step substitutes it from `cksum % 60`, before the file is written both to the
+  tree and back via the API, so both write paths carry the same bytes. The
+  substitution refuses to install a consumer that still contains the
+  placeholder.
+- **Cost, stated rather than buried:** worst-case pickup of a newly opened or
+  updated intarweb→upstream PR goes from 1 h to 6 h. The pre-push dispatch hook
+  still catches a push from a clone that has it installed within seconds — but
+  it is per-clone and untracked, so a push from a clone that never ran
+  `scripts/install-push-hook.sh`, from the GitHub UI, or from a bot dispatches
+  nothing. The schedule is the only server-side guarantee, and that guarantee is
+  now six-hourly. (Measured: 2 of 3 sampled forks show `workflow_dispatch` runs;
+  `docker-autoheal` shows none.)
+- **Not changed:** the no-op gate, the fold logic, the fingerprint. This is the
+  cadence and its offset only.
+- **Residual:** the fold has no alarm. A build that stops entirely is silent
+  until someone needs an image — this one went two days. A missing or late image
+  should be detected and reported, not discovered by hand.
+
+
 ### W7 (2026-09-22)
 - F10 named image variants. Two optional repo Variables:
   - `DOCKER_TARGET` — stage for the default build. Closes the silent-move hazard:
