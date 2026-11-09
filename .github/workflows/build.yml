@@ -292,10 +292,16 @@ jobs:
           # (base-image drift, CVE in a FROM layer). DOCKER_TARGET and
           # IMAGE_VARIANTS are here for the same reason: adding or retargeting a
           # variant changes the artifact, so it must change the fingerprint.
-          INPUTS="$(printf '%s|%s|%s|%s|%s|%s|%s' \
+          # The installed overlay (.github/workflows/build.yml) is part of the
+          # assembled tree, so it is part of the fingerprint: a cadence change
+          # (W8) changed every fork's tree while upstream and the PR set stood
+          # still, and the release-tag check then found one fingerprint naming
+          # two trees and refused to publish (SGM-Helper, 2026-11-09).
+          OVERLAY="$(sha256sum .github/workflows/build.yml 2>/dev/null | cut -c1-12 || true)"
+          INPUTS="$(printf '%s|%s|%s|%s|%s|%s|%s|%s' \
             "${V_DOCKERFILE:-}" "${V_CONTEXT:-}" "${V_PLATFORMS:-}" \
             "${V_BUILD_ARGS:-}" "${V_REBUILD_EPOCH:-}" \
-            "${V_DOCKER_TARGET:-}" "${V_IMAGE_VARIANTS:-}" | sha256sum | cut -c1-12)"
+            "${V_DOCKER_TARGET:-}" "${V_IMAGE_VARIANTS:-}" "${OVERLAY:-}" | sha256sum | cut -c1-12)"
           # Variants: the default build is always first, with an empty suffix.
           # IMAGE_VARIANTS adds `suffix:target` entries — a NAMED stage of the
           # same Dockerfile, built from the same folded tree, published under a
