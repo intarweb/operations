@@ -322,11 +322,23 @@ jobs:
             # than that, ours fell off the page and every build silently folded none (mcp-gateway,
             # 2026-10-06: 78 open upstream, ours older). Fail on a lookup error rather than build an
             # image without our PRs.
+            # baseRefName: a PR is linearised onto ITS OWN base, not onto the
+            # upstream default. A fork tracking a release line (dynacat's beta,
+            # 2026-11-15) has PRs opened against that line, and picking
+            # `HEAD..pr/<b>` dragged the whole release line onto a main-based
+            # tree: every such PR conflicted and rolled back, red for a reason
+            # that had nothing to do with the PR.
             OPEN_PRS="$(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open --limit 1000 \
-              --json headRefName,headRepositoryOwner \
-              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|.headRefName')" \
+              --json headRefName,headRepositoryOwner,baseRefName \
+              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|"\(.headRefName) \(.baseRefName)"')" \
               || { echo "::error::could not list open PRs on ${{ steps.cls.outputs.upstream }}"; exit 1; }
-            mapfile -t BRANCHES <<<"$OPEN_PRS"
+            declare -A PR_BASE=()
+            BRANCHES=()
+            while read -r _b _base; do
+              [ -z "${_b:-}" ] && continue
+              BRANCHES+=("$_b")
+              PR_BASE["$_b"]="${_base:-}"
+            done <<<"$OPEN_PRS"
             # Parents first. gh lists newest PRs first, so a PR stacked on another
             # (opened after it) would be picked before its parent. Fetch every
             # branch, then order them so a branch whose tip is an ancestor of
@@ -364,12 +376,30 @@ jobs:
             done
             SORTED="$(printf '%s\n' $PR_SHAS | sort | tr '\n' ' ')"
             FP="$(printf '%s %s %s' "$MAIN_SHA" "$SORTED" "$INPUTS" | sha256sum | cut -c1-12)"
+            # Fold bases: one `<branch>:<base>` pair per PR, so the assemble step
+            # ranges each PR from its own base instead of from HEAD.
+            BASES_FETCHED=""
+            FOLD_BASES=""
+            for b in "${BRANCHES[@]:-}"; do
+              [ -z "$b" ] && continue
+              base="${PR_BASE[$b]:-}"
+              [ -z "$base" ] && continue
+              FOLD_BASES="$FOLD_BASES $b:$base"
+              [ "$base" = "${{ steps.cls.outputs.up_default }}" ] && continue
+              case " $BASES_FETCHED " in *" $base "*) continue;; esac
+              git fetch --quiet "https://github.com/${{ steps.cls.outputs.upstream }}.git" "+refs/heads/$base:refs/remotes/base/$base" \
+                || { echo "::error::could not fetch base branch '$base' of PR $b from ${{ steps.cls.outputs.upstream }}"; exit 1; }
+              BASES_FETCHED="$BASES_FETCHED $base"
+              echo "  PR base $base -> $(git rev-parse "base/$base")"
+            done
+            echo "fold_bases=${FOLD_BASES# }" >> "$GITHUB_OUTPUT"
             echo "branches=${BRANCHES[*]:-}" >> "$GITHUB_OUTPUT"
           else
             # Greenfield fp is no longer the bare git sha — build inputs fold in
             # too, so a BUILD_ARGS change ships without an empty commit.
             FP="$(printf '%s %s' "$(git rev-parse HEAD)" "$INPUTS" | sha256sum | cut -c1-12)"
             echo "branches=" >> "$GITHUB_OUTPUT"
+            echo "fold_bases=" >> "$GITHUB_OUTPUT"
           fi
           echo "fp=$FP" >> "$GITHUB_OUTPUT"
           echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
@@ -468,7 +498,17 @@ jobs:
             # (e.g. "Merge origin/X into Y") makes `cherry-pick HEAD..pr/$b`
             # fail with "commit ... is a merge but no -m option was given" and
             # skip the WHOLE PR. Pick each non-merge commit in order instead.
-            mapfile -t COMMITS < <(git rev-list --no-merges --reverse "HEAD..pr/$b")
+            # Range from the PR's OWN base when we fetched one, so a PR opened
+            # against a release line contributes its own commits and not that
+            # line's whole history. HEAD when the base is the upstream default,
+            # because previous PRs are already applied on top of it.
+            RANGE_BASE="HEAD"
+            PR_BASE_NAME="$(printf '%s\n' ${{ steps.fp.outputs.fold_bases }} | tr ' ' '\n' | sed -n "s/^${b}://p" | head -1)"
+            if [ -n "${PR_BASE_NAME:-}" ] && git rev-parse --verify --quiet "refs/remotes/base/$PR_BASE_NAME" >/dev/null; then
+              RANGE_BASE="base/$PR_BASE_NAME"
+              echo "  $b is based on $PR_BASE_NAME, ranging from $(git rev-parse --short "base/$PR_BASE_NAME")"
+            fi
+            mapfile -t COMMITS < <(git rev-list --no-merges --reverse "$RANGE_BASE..pr/$b")
             [ ${#COMMITS[@]} -eq 0 ] && { echo "  no commits to pick for $b"; continue; }
             echo "  cherry-pick ${#COMMITS[@]} commits (linearized) from pr/$b"
             OK=true
@@ -502,7 +542,7 @@ jobs:
                 continue
               fi
               git cherry-pick --abort || true
-              echo "::warning::PR $b conflicts with upstream at $(echo "$c" | cut -c1-7) — rolling back the whole PR; rebase it to fold in"
+              echo "::warning::PR $b conflicts on the build tree at $(echo "$c" | cut -c1-7) (base $RANGE_BASE) — rolling back the whole PR; rebase it onto ${{ steps.cls.outputs.up_default }} or its own base to fold in"
               cat /tmp/cp.err >&2 || true
               OK=false
               break
