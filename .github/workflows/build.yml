@@ -516,6 +516,9 @@ jobs:
               [ -z "$pair" ] && continue
               [ "${pair%%:*}" = "$b" ] && { PR_BASE_NAME="${pair#*:}"; break; }
             done
+            if [ -z "${PR_BASE_NAME:-}" ]; then
+              echo "::warning::PR $b reports no base branch; ranging from HEAD"
+            fi
             if [ -n "${PR_BASE_NAME:-}" ] && git rev-parse --verify --quiet "refs/remotes/base/$PR_BASE_NAME" >/dev/null; then
               RANGE_BASE="base/$PR_BASE_NAME"
               echo "  $b is based on $PR_BASE_NAME, ranging from $(git rev-parse --short "base/$PR_BASE_NAME")"
