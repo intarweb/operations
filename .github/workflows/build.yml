@@ -329,15 +329,17 @@ jobs:
             # tree: every such PR conflicted and rolled back, red for a reason
             # that had nothing to do with the PR.
             OPEN_PRS="$(gh pr list -R "${{ steps.cls.outputs.upstream }}" --state open --limit 1000 \
-              --json headRefName,headRepositoryOwner,baseRefName \
-              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|"\(.headRefName) \(.baseRefName)"')" \
+              --json headRefName,headRepositoryOwner,baseRefName,number \
+              --jq '.[]|select(.headRepositoryOwner.login=="intarweb")|"\(.headRefName) \(.baseRefName) \(.number)"')" \
               || { echo "::error::could not list open PRs on ${{ steps.cls.outputs.upstream }}"; exit 1; }
             declare -A PR_BASE=()
+            declare -A PR_NUM=()
             BRANCHES=()
-            while read -r _b _base; do
+            while read -r _b _base _num; do
               [ -z "${_b:-}" ] && continue
               BRANCHES+=("$_b")
               PR_BASE["$_b"]="${_base:-}"
+              PR_NUM["$_b"]="${_num:-}"
             done <<<"$OPEN_PRS"
             # Parents first. gh lists newest PRs first, so a PR stacked on another
             # (opened after it) would be picked before its parent. Fetch every
@@ -384,7 +386,7 @@ jobs:
               [ -z "$b" ] && continue
               base="${PR_BASE[$b]:-}"
               [ -z "$base" ] && continue
-              FOLD_BASES="$FOLD_BASES $b:$base"
+              FOLD_BASES="$FOLD_BASES $b:$base:${PR_NUM[$b]:-}"
               [ "$base" = "${{ steps.cls.outputs.up_default }}" ] && continue
               case " $BASES_FETCHED " in *" $base "*) continue;; esac
               git fetch --quiet "https://github.com/${{ steps.cls.outputs.upstream }}.git" "+refs/heads/$base:refs/remotes/base/$base" \
@@ -485,6 +487,10 @@ jobs:
           git config user.email ci@intarweb.invalid
           APPLIED=""
           FAILED=""
+          EXCLUDED=""
+          SIBLING=false
+          PROVENANCE="$(mktemp)"
+          : >"$PROVENANCE"
           # Patch-ids of every change already on the build tree. A stacked PR's range
           # (HEAD..pr/<child>) still lists its parent's commits, because the parent was
           # picked as new SHAs; re-applying them conflicts with whatever a later PR
@@ -511,10 +517,16 @@ jobs:
             # ours carry slashes (dev/<user>/<thing>), which break a sed /-delimited
             # s///  outright and whose dots would match any character.
             PR_BASE_NAME=""
+            PR_NUM_NAME=""
             read -r -a FOLD_PAIRS <<<"${FOLD_BASES:-}"
             for pair in "${FOLD_PAIRS[@]:-}"; do
               [ -z "$pair" ] && continue
-              [ "${pair%%:*}" = "$b" ] && { PR_BASE_NAME="${pair#*:}"; break; }
+              if [ "${pair%%:*}" = "$b" ]; then
+                _rest="${pair#*:}"
+                PR_BASE_NAME="${_rest%%:*}"
+                PR_NUM_NAME="${_rest#*:}"
+                break
+              fi
             done
             if [ -z "${PR_BASE_NAME:-}" ]; then
               echo "::warning::PR $b reports no base branch; ranging from HEAD"
@@ -539,6 +551,10 @@ jobs:
               # The old add/add build.yml handler is gone with the seed step (F1).
               if git cherry-pick "$c" 2>/tmp/cp.err; then
                 HAVE="$HAVE$PID "
+                while IFS= read -r _f; do
+                  [ -z "$_f" ] && continue
+                  printf '%s\t%s\t%s\n' "$_f" "$b" "${PR_NUM_NAME:-}" >> "$PROVENANCE"
+                done < <(git show --pretty=format: --name-only "$c")
                 echo "    applied $(echo "$c" | cut -c1-7)"
                 continue
               fi
@@ -556,7 +572,39 @@ jobs:
                 echo "    already on the tree, skipped $(echo "$c" | cut -c1-7)"
                 continue
               fi
+              # Two different failures wear the same face here.
+              #
+              # The commit conflicts with something earlier on the tree. If that
+              # something came from OUR OWN open PR earlier in this same fold,
+              # both PRs are ours, siblings, and only one can be in the tree at a
+              # time — they land upstream one at a time. Failing the whole run for
+              # that is a red build with no defect behind it. If instead the tree
+              # only carries upstream, the PR genuinely does not apply and the run
+              # must stay red: that distinction is the whole point, not a way to
+              # go green.
+              CONFLICT_FILES=()
+              while IFS= read -r _f; do [ -n "$_f" ] && CONFLICT_FILES+=("$_f"); done \
+                < <(git diff --name-only --diff-filter=U)
+              EARLIER=""
+              EARLIER_NUM=""
+              ALL_OURS=true
+              for _f in "${CONFLICT_FILES[@]:-}"; do
+                [ -z "$_f" ] && continue
+                _o="$(awk -F'\t' -v f="$_f" -v cur="$b" '$1==f && $2!=cur {print $2; exit}' "$PROVENANCE" 2>/dev/null || true)"
+                if [ -z "$_o" ]; then ALL_OURS=false; break; fi
+                [ -z "$EARLIER" ] && { EARLIER="$_o"; EARLIER_NUM="$(awk -F'\t' -v f="$_f" -v cur="$b" '$1==f && $2!=cur {print $3; exit}' "$PROVENANCE" 2>/dev/null || true)"; }
+              done
               git cherry-pick --abort || true
+              if [ "$ALL_OURS" = "true" ] && [ -n "$EARLIER" ]; then
+                git reset --hard "$BASE"
+                HAVE="$HAVE_AT_BASE"
+                echo "::warning::PR ${PR_NUM_NAME:-$b} ($b) not folded: conflicts with PR ${EARLIER_NUM:-$EARLIER} ($EARLIER) on ${CONFLICT_FILES[*]} — both open PRs, same file; they must land sequentially"
+                EXCLUDED="$EXCLUDED,$b:$EARLIER:$(IFS=,; echo "${CONFLICT_FILES[*]}")"
+                echo "  excluded $b (sibling of $EARLIER)"
+                OK=false
+                SIBLING=true
+                break
+              fi
               echo "::warning::PR $b conflicts on the build tree at $(echo "$c" | cut -c1-7) (base $RANGE_BASE) — rolling back the whole PR; rebase it onto ${{ steps.cls.outputs.up_default }} or its own base to fold in"
               cat /tmp/cp.err >&2 || true
               OK=false
@@ -564,6 +612,8 @@ jobs:
             done
             if [ "$OK" = "true" ]; then
               APPLIED="$APPLIED,$b"
+            elif [ "${SIBLING:-false}" = "true" ]; then
+              SIBLING=false
             else
               git reset --hard "$BASE"
               HAVE="$HAVE_AT_BASE"
@@ -573,10 +623,13 @@ jobs:
           done
           A="${APPLIED#,}"
           F="${FAILED#,}"
+          E="${EXCLUDED#,}"
           echo "applied=$A" >> "$GITHUB_OUTPUT"
           echo "failed=$F"  >> "$GITHUB_OUTPUT"
+          echo "excluded=$E" >> "$GITHUB_OUTPUT"
           { echo "- applied PRs: \`${A:-<none>}\`"; \
-            echo "- rolled back: \`${F:-<none>}\`"; } >> "$GITHUB_STEP_SUMMARY"
+            echo "- rolled back: \`${F:-<none>}\`"; \
+            echo "- excluded, sibling of another open PR: \`${E:-<none>}\`"; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 🔍 Locate Dockerfile + context
         id: df
@@ -702,6 +755,14 @@ jobs:
             # that published it rolled nothing back.
             --label "net.siliconspirit.intarweb.fold=${COMPLETE_LABEL}"
           )
+
+          # A sibling exclusion is not an incomplete fold, but an image that
+          # quietly lacks two of our PRs is the failure mode worth labelling
+          # against: the exclusion travels on the image, not only in the log.
+          EXCLUDED_LABEL="${{ steps.pick.outputs.excluded }}"
+          if [ -n "$EXCLUDED_LABEL" ]; then
+            LABELS+=(--label "net.siliconspirit.intarweb.excluded=${EXCLUDED_LABEL}")
+          fi
 
           # A complete fold publishes :latest + :sha-<fp>; a rolled-back one
           # publishes ONLY :partial-sha-<fp>, so `:sha-<fp>` existing is itself
