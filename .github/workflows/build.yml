@@ -475,6 +475,10 @@ jobs:
       - name: 🍒 Assemble (cherry-pick open PRs onto build tree)
         id: pick
         if: steps.cls.outputs.skip == 'false' && steps.noop.outputs.skip == 'false' && steps.cls.outputs.fork == 'true'
+        env:
+          # Through env, not interpolated into the script: a step output pasted
+          # into a run: block is script text, and quoting it would still be text.
+          FOLD_BASES: ${{ steps.fp.outputs.fold_bases }}
         run: |
           set -euo pipefail
           git config user.name intarweb-ci
@@ -503,7 +507,15 @@ jobs:
             # line's whole history. HEAD when the base is the upstream default,
             # because previous PRs are already applied on top of it.
             RANGE_BASE="HEAD"
-            PR_BASE_NAME="$(printf '%s\n' ${{ steps.fp.outputs.fold_bases }} | tr ' ' '\n' | sed -n "s/^${b}://p" | head -1)"
+            # Matched in bash, not sed: a branch name is real input and most of
+            # ours carry slashes (dev/<user>/<thing>), which break a sed /-delimited
+            # s///  outright and whose dots would match any character.
+            PR_BASE_NAME=""
+            read -r -a FOLD_PAIRS <<<"${FOLD_BASES:-}"
+            for pair in "${FOLD_PAIRS[@]:-}"; do
+              [ -z "$pair" ] && continue
+              [ "${pair%%:*}" = "$b" ] && { PR_BASE_NAME="${pair#*:}"; break; }
+            done
             if [ -n "${PR_BASE_NAME:-}" ] && git rev-parse --verify --quiet "refs/remotes/base/$PR_BASE_NAME" >/dev/null; then
               RANGE_BASE="base/$PR_BASE_NAME"
               echo "  $b is based on $PR_BASE_NAME, ranging from $(git rev-parse --short "base/$PR_BASE_NAME")"
