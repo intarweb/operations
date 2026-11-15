@@ -202,6 +202,72 @@ check "a rolled-back fold labels the image partial" partial "$(label_for false)"
 check "the no-op probe accepts only an exact complete" yes \
   "$(grep -q 'all(. == \"complete\")' "$WF" && echo yes || echo no)"
 
+echo "sibling proof: a shared path is not a shared hunk"
+# A per-file rule calls a PR a sibling whenever an earlier PR of ours touched a
+# conflicted PATH, and that is equally true of a PR that also collides with
+# upstream's own edit to that file: it excludes the PR and publishes green on a
+# tree the PR does not apply to. The workflow proves it instead, by replaying
+# the PR on the bare upstream tree, and this runs that replay — extracted from
+# the workflow rather than copied out of it.
+PROOF="$(mktemp)"
+"$HERE/extract-sibling-proof.sh" "$WF" > "$PROOF"
+bash -n "$PROOF"
+
+FIX="$(mktemp -d)"
+cleanup_fixture() { rm -rf "$FIX" "$PROOF"; }
+trap cleanup_fixture EXIT
+
+(
+  set -e
+  cd "$FIX"
+  git init -q -b main
+  git config user.email t@example.invalid
+  git config user.name t
+  # C0: upstream as it stood when PR C was written.
+  printf 'title\nbase line\n' > CHANGELOG.md
+  git add -A && git commit -q -m c0
+  C0="$(git rev-parse HEAD)"
+  # The bare tree the fold starts from: upstream has since edited that line.
+  printf 'title\nbase line (upstream)\n' > CHANGELOG.md
+  git commit -qam "upstream edit"
+  UP="$(git rev-parse HEAD)"
+  # A: our open PR, appends to the same file, applies clean.
+  git checkout -q -b prA "$UP"
+  printf 'title\nbase line (upstream)\nADDED BY A\n' > CHANGELOG.md
+  git commit -qam A
+  # B: a sibling of A — same insertion point, and clean on the bare tree.
+  git checkout -q -b prB "$UP"
+  printf 'title\nbase line (upstream)\nADDED BY B\n' > CHANGELOG.md
+  git commit -qam B
+  # D: a sibling in two commits, so the replay's loop is exercised.
+  git checkout -q -b prD "$UP"
+  printf 'title\nbase line (upstream)\nD1\n' > CHANGELOG.md
+  git commit -qam D1
+  printf 'title\nbase line (upstream)\nD1\nD2\n' > CHANGELOG.md
+  git commit -qam D2
+  # C: collides with upstream's own edit, and lands on the same file as A —
+  # which is exactly what the per-file rule could not tell apart from B.
+  git checkout -q -b prC "$C0"
+  printf 'title\nbase line (C)\n' > CHANGELOG.md
+  git commit -qam C
+  for p in A B C D; do
+    git update-ref "refs/remotes/pr/$p" "$(git rev-parse "pr$p")"
+  done
+  git checkout -q main
+  . "$PROOF"
+  rc() { if sibling_proven "$1" "$UP" "${2:-$UP}"; then echo 0; else echo $?; fi; }
+  { printf 'A:%s\n' "$(rc A)"; printf 'B:%s\n' "$(rc B)";
+    printf 'C:%s\n' "$(rc C "$C0")"; printf 'D:%s\n' "$(rc D)"; } > "$FIX/result"
+)
+res() { sed -n "s/^$1://p" "$FIX/result"; }
+
+check "a PR that applies to the bare tree proves clean (not itself a conflict)" 0 "$(res A)"
+check "a PR whose only obstacle is an earlier PR of ours is a sibling" 0 "$(res B)"
+check "the same, across more than one of its own commits" 0 "$(res D)"
+check "a PR that collides with upstream is NOT a sibling" 1 "$(res C)"
+check "the classifier decides a sibling by replay, never by the provenance table" yes \
+  "$(grep -q 'ALL_OURS' "$WF" && echo no || echo yes)"
+
 if [ "$fails" -gt 0 ]; then
   printf '\n%d check(s) failed\n' "$fails"
   exit 1

@@ -497,6 +497,54 @@ jobs:
           # changed on the same lines. A commit whose patch-id is already here is the
           # same change, so it is skipped rather than re-applied.
           HAVE=" "
+          # The tree the fold starts from: upstream, none of our PRs applied. The
+          # sibling proof below replays a PR here, so this is captured before the
+          # loop moves it.
+          UPSTREAM_TREE="$(git rev-parse HEAD)"
+          # sibling-proof:begin
+          # Is this PR's conflict caused by an earlier PR of ours, or by upstream?
+          #
+          # The provenance table answers "has an earlier PR of ours touched this
+          # path?", which is not the question. A shared path says nothing about the
+          # conflicting hunk: PR A and PR B can both edit CHANGELOG.md while B also
+          # collides with upstream's own edit to it, and on B's conflicted paths
+          # alone it looks exactly like the sibling case. Calling that a sibling
+          # excludes B and publishes green on a tree B does not apply to.
+          #
+          # Ask it directly: replay the PR's own commits on the bare upstream tree,
+          # with none of our PRs applied. Clean there means an earlier PR is the
+          # only thing in the way — a sibling. A conflict there means upstream, and
+          # the run stays red. In a throwaway worktree, so the build tree is
+          # untouched. Returns 0 sibling, 1 not, 2 cannot prove (caller fails
+          # closed).
+          sibling_proven() { # <branch> <upstream-tree> <range-base>
+            local b="$1" up="$2" rb="$3" wt rc=0 c
+            wt="$(mktemp -d)"
+            rmdir "$wt" 2>/dev/null || true
+            if ! git worktree add --detach "$wt" "$up" >/dev/null 2>&1; then
+              return 2
+            fi
+            while IFS= read -r c; do
+              [ -z "$c" ] && continue
+              if git -C "$wt" cherry-pick "$c" >/dev/null 2>&1; then
+                continue
+              fi
+              # An empty cherry-pick is the change already being upstream's, not
+              # a conflict; the same state test the fold itself uses.
+              if [ -f "$(git -C "$wt" rev-parse --git-path CHERRY_PICK_HEAD)" ] && \
+                 [ -z "$(git -C "$wt" diff --name-only --diff-filter=U)" ]; then
+                git -C "$wt" cherry-pick --skip >/dev/null 2>&1 || \
+                  git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+                continue
+              fi
+              git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+              rc=1
+              break
+            done < <(git rev-list --no-merges --reverse "$rb..pr/$b")
+            git worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
+            return "$rc"
+          }
+          # sibling-proof:end
           for b in ${{ steps.fp.outputs.branches }}; do
             HAVE_AT_BASE="$HAVE"
             # F2 — rollback point. A PR lands WHOLE or not at all. Without this,
@@ -585,22 +633,27 @@ jobs:
               CONFLICT_FILES=()
               while IFS= read -r _f; do [ -n "$_f" ] && CONFLICT_FILES+=("$_f"); done \
                 < <(git diff --name-only --diff-filter=U)
+              # Provenance names the PR this one has to land after. It does not
+              # decide: a shared path is not a shared hunk, so the sibling_proven
+              # replay above is what answers the question.
               EARLIER=""
               EARLIER_NUM=""
-              ALL_OURS=true
               for _f in "${CONFLICT_FILES[@]:-}"; do
                 [ -z "$_f" ] && continue
                 _o="$(awk -F'\t' -v f="$_f" -v cur="$b" '$1==f && $2!=cur {print $2; exit}' "$PROVENANCE" 2>/dev/null || true)"
-                if [ -z "$_o" ]; then ALL_OURS=false; break; fi
-                [ -z "$EARLIER" ] && { EARLIER="$_o"; EARLIER_NUM="$(awk -F'\t' -v f="$_f" -v cur="$b" '$1==f && $2!=cur {print $3; exit}' "$PROVENANCE" 2>/dev/null || true)"; }
+                [ -z "$_o" ] && continue
+                if [ -z "$EARLIER" ]; then
+                  EARLIER="$_o"
+                  EARLIER_NUM="$(awk -F'\t' -v f="$_f" -v cur="$b" '$1==f && $2!=cur {print $3; exit}' "$PROVENANCE" 2>/dev/null || true)"
+                fi
               done
               git cherry-pick --abort || true
-              if [ "$ALL_OURS" = "true" ] && [ -n "$EARLIER" ]; then
+              if sibling_proven "$b" "$UPSTREAM_TREE" "$RANGE_BASE"; then
                 git reset --hard "$BASE"
                 HAVE="$HAVE_AT_BASE"
-                echo "::warning::PR ${PR_NUM_NAME:-$b} ($b) not folded: conflicts with PR ${EARLIER_NUM:-$EARLIER} ($EARLIER) on ${CONFLICT_FILES[*]} — both open PRs, same file; they must land sequentially"
-                EXCLUDED="$EXCLUDED,$b:$EARLIER:$(IFS=,; echo "${CONFLICT_FILES[*]}")"
-                echo "  excluded $b (sibling of $EARLIER)"
+                echo "::warning::PR ${PR_NUM_NAME:-$b} ($b) not folded: applies to upstream with none of our PRs applied, so it conflicts with PR ${EARLIER_NUM:-${EARLIER:-an earlier open PR}} (${EARLIER:-unnamed}) on ${CONFLICT_FILES[*]} — both open PRs; they must land sequentially"
+                EXCLUDED="$EXCLUDED,$b:${EARLIER:-?}:$(IFS=,; echo "${CONFLICT_FILES[*]}")"
+                echo "  excluded $b (sibling of ${EARLIER:-an earlier open PR})"
                 OK=false
                 SIBLING=true
                 break
