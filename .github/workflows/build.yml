@@ -54,6 +54,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE_NAME: ${{ vars.IMAGE_NAME }}
+          UPSTREAM_BRANCH: ${{ vars.UPSTREAM_BRANCH }}
         run: |
           set -euo pipefail
           PARENT="$(gh api "repos/${{ github.repository }}" --jq '.parent.full_name // ""' 2>/dev/null || true)"
@@ -67,6 +68,15 @@ jobs:
           if [ "$IS_FORK" = "true" ]; then
             UP_DEFAULT="$(gh api "repos/$PARENT" --jq '.default_branch' 2>/dev/null || echo "$DEFAULT")"
           fi
+          # A repo Variable names the branch the mirror tracks when it is not the
+          # upstream default. Development is not always on the default branch: a
+          # PR opened against `beta` is diffed against `beta`, so folding it onto
+          # `main` conflicts where the two diverge — and where it does not
+          # conflict it applies to a tree no one upstream builds, then publishes
+          # green. Tracking the branch the PRs target is the only tree that
+          # answers "upstream plus our PRs". Opt-in per repo, as W7's vars are:
+          # unset reproduces the upstream-default behaviour exactly.
+          UP_DEFAULT="${UPSTREAM_BRANCH:-$UP_DEFAULT}"
           SKIP="false"
           # greenfield: only build on pushes to the default branch (and dispatch/schedule).
           # PR-triggered runs on a greenfield non-default PR branch are a no-op.
