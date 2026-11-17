@@ -762,6 +762,10 @@ jobs:
           IMAGE: ${{ steps.cls.outputs.image }}
           FP: ${{ steps.fp.outputs.fp }}
           HEAD_SHA: ${{ steps.fp.outputs.head }}
+          # Empty on a greenfield build: the sync step only runs for a fork. The
+          # label below falls back to HEAD_SHA there, which for a greenfield repo
+          # is the same thing.
+          UPSTREAM_SHA: ${{ steps.sync.outputs.upstream_sha }}
           UPSTREAM: ${{ steps.cls.outputs.upstream }}
           APPLIED: ${{ steps.pick.outputs.applied }}
           DF: ${{ steps.df.outputs.df }}
@@ -808,7 +812,14 @@ jobs:
 
           LABELS=(
             --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+            # revision is the fold commit: the tree this build assembled from
+            # upstream + the open PRs. It is never pushed to any repository, so a
+            # reader cannot look it up. It stays because it is the exact source
+            # built; upstream-commit is the handle that resolves, and fold-commit
+            # names what revision actually is so the two are not confused.
             --label "org.opencontainers.image.revision=${HEAD_SHA}"
+            --label "net.siliconspirit.intarweb.upstream-commit=${UPSTREAM_SHA:-$HEAD_SHA}"
+            --label "net.siliconspirit.intarweb.fold-commit=${HEAD_SHA}"
             --label "org.opencontainers.image.version=sha-${FP}"
             --label "org.opencontainers.image.description=upstream ${UPSTREAM} + intarweb PRs [${APPLIED}]"
             # Fold completeness travels WITH the image, and must match what was
